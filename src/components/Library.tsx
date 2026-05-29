@@ -1,10 +1,9 @@
 import { useState, useEffect, useRef } from 'react';
-import { Upload, BookOpen, Trash2, CheckCircle2 } from 'lucide-react';
+import { Upload, Trash2, CheckCircle2 } from 'lucide-react';
 import { getComics, saveComicFile, saveComicMetadata, deleteComic } from '../lib/db';
 import { ComicParser } from '../lib/parser';
 import { Comic } from '../types';
-import { generateId, formatTime } from '../lib/utils';
-import { cn } from '../lib/utils';
+import { generateId, cn } from '../lib/utils';
 
 export default function Library({ onOpenComic }: { onOpenComic: (id: string) => void }) {
   const [comics, setComics] = useState<Comic[]>([]);
@@ -227,7 +226,7 @@ export default function Library({ onOpenComic }: { onOpenComic: (id: string) => 
       <footer className="h-12 bg-black border-t border-[#222] hidden sm:flex items-center justify-between px-8 text-[10px] font-bold uppercase tracking-[0.2em] text-[#555] mt-auto">
         <div className="flex gap-4">
           <span>Local Storage: Active</span>
-          <span className="text-cyan-400">PanelPass v2.0</span>
+          <span className="text-cyan-400">PanelPass v1.0</span>
         </div>
         <div className="flex gap-8">
           <span className="hover:text-white cursor-pointer transition-colors">Privacy: Offline Only</span>

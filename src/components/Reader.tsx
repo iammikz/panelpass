@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { ArrowLeft, Settings, ZoomIn, ZoomOut, Moon, Sun, Monitor, Menu, Smartphone, LayoutPanelLeft } from 'lucide-react';
+import { ArrowLeft, Moon, Sun, Smartphone, LayoutPanelLeft } from 'lucide-react';
 import { getComics, getComicFile, updateComicProgress } from '../lib/db';
 import { ComicParser } from '../lib/parser';
 import { Comic, Theme } from '../types';
@@ -18,7 +18,6 @@ export default function Reader({ comicId, onBack }: { comicId: string; onBack: (
   const [showUI, setShowUI] = useState(true);
   const [isZoomed, setIsZoomed] = useState(false);
   const [zoomOrigin, setZoomOrigin] = useState({ x: 50, y: 50 });
-  const containerRef = useRef<HTMLDivElement>(null);
   const comicRef = useRef<Comic | null>(null);
   const pageUrlRef = useRef<string>('');
   const nextPageUrlRef = useRef<string>('');
@@ -116,8 +115,8 @@ export default function Reader({ comicId, onBack }: { comicId: string; onBack: (
       return;
     }
 
-    const { clientX, clientY } = e;
-    const { innerWidth, innerHeight } = window;
+    const { clientX } = e;
+    const { innerWidth } = window;
     
     // UI toggle zone (center 40%)
     const xRatio = clientX / innerWidth;
@@ -225,7 +224,6 @@ export default function Reader({ comicId, onBack }: { comicId: string; onBack: (
 
       {/* Reading Canvas */}
       <div 
-        ref={containerRef}
         onClick={handleTap}
         onDoubleClick={handleDoubleTap}
         className={cn(

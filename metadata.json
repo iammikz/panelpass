@@ -1,0 +1,6 @@
+{
+  "name": "PanelPass",
+  "description": "Your Personal Comic Reader. Upload and read CBR/CBZ comics entirely in your browser with no cloud dependency.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}

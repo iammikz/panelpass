@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
-import { Upload, Trash2, CheckCircle2 } from 'lucide-react';
+import { Upload, Trash2, CheckCircle2, HelpCircle } from 'lucide-react';
 import GoogleDrivePicker from './GoogleDrivePicker';
+import HowToUse, { STORAGE_KEY as HOWTO_STORAGE_KEY } from './HowToUse';
 import { getComics, saveComicFile, saveComicMetadata, deleteComic } from '../lib/db';
 import { ComicParser } from '../lib/parser';
 import { Comic } from '../types';
@@ -17,10 +18,14 @@ export default function Library({ onOpenComic }: { onOpenComic: (id: string) => 
   const [comics, setComics] = useState<Comic[]>([]);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [showHowToUse, setShowHowToUse] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     loadComics();
+    if (!localStorage.getItem(HOWTO_STORAGE_KEY)) {
+      setShowHowToUse(true);
+    }
   }, []);
 
   const loadComics = async () => {
@@ -126,6 +131,14 @@ export default function Library({ onOpenComic }: { onOpenComic: (id: string) => 
           </button>
 
           <GoogleDrivePicker onImport={processFile} importedDriveIds={importedDriveIds} />
+
+          <button
+            onClick={() => setShowHowToUse(true)}
+            className="border border-[#333] p-2 text-[#666] hover:border-cyan-400 hover:text-cyan-400 transition-colors"
+            title="How to use"
+          >
+            <HelpCircle size={18} />
+          </button>
         </div>
       </header>
 
@@ -247,6 +260,8 @@ export default function Library({ onOpenComic }: { onOpenComic: (id: string) => 
         )}
       </main>
       
+      <HowToUse open={showHowToUse} onClose={() => setShowHowToUse(false)} />
+
       <footer className="h-12 bg-black border-t border-[#222] hidden sm:flex items-center justify-between px-8 text-[10px] font-bold uppercase tracking-[0.2em] text-[#555] mt-auto">
         <div className="flex gap-4">
           <span>Local Storage: Active</span>

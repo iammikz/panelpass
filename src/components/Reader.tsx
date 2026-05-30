@@ -340,7 +340,7 @@ export default function Reader({ comicId, onBack }: { comicId: string; onBack: (
       {/* Top Header UI */}
       <div 
         className={cn(
-          "absolute top-0 left-0 right-0 z-50 transform transition-transform duration-300 p-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2",
+          "absolute top-0 left-0 sm:right-0 z-50 transform transition-transform duration-300 p-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2",
           theme === 'dark' ? "bg-gradient-to-b from-black/80 to-transparent" : "bg-gradient-to-b from-white/90 to-transparent shadow-sm",
           showUI ? "translate-y-0" : "-translate-y-full"
         )}
@@ -362,7 +362,7 @@ export default function Reader({ comicId, onBack }: { comicId: string; onBack: (
           </div>
         </div>
 
-        <div className="flex flex-col sm:flex-row sm:items-center gap-1.5">
+        <div className="flex flex-col items-start sm:flex-row sm:items-center gap-1.5">
           {/* Main mode: Single / Webtoon */}
           <div className={cn("flex items-center rounded border", theme === 'dark' ? 'border-white/10' : 'border-black/10')}>
             <button

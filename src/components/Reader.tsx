@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { ArrowLeft, Moon, Sun, Smartphone, LayoutPanelLeft, BookOpen, AlignJustify, GalleryVertical, GalleryHorizontal } from 'lucide-react';
 import { getComics, getComicFile, updateComicProgress } from '../lib/db';
 import { ComicParser } from '../lib/parser';
@@ -31,10 +31,18 @@ export default function Reader({ comicId, onBack }: { comicId: string; onBack: (
   const nextPageUrlRef = useRef<string>('');
   const allPageUrlsRef = useRef<string[]>([]);
   const hideUITimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isZoomedRef = useRef(false);
+  // Touch gesture tracking
+  const touchStartXRef = useRef(0);
+  const touchStartYRef = useRef(0);
+  const touchStartTimeRef = useRef(0);
+  const lastTapTimeRef = useRef(0);
+  const doubleTapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Keep refs in sync so stale closures always read fresh values
   comicRef.current = comic;
   parserRef.current = parser;
+  isZoomedRef.current = isZoomed;
 
   // Settings
   const [theme, setTheme] = useLocalStorage<Theme>('panelpass-theme', 'dark');
@@ -55,6 +63,7 @@ export default function Reader({ comicId, onBack }: { comicId: string; onBack: (
     return () => {
       // Clean up object URLs on unmount using refs so the latest URLs are revoked
       if (hideUITimerRef.current) clearTimeout(hideUITimerRef.current);
+      if (doubleTapTimerRef.current) clearTimeout(doubleTapTimerRef.current);
       if (pageUrlRef.current) URL.revokeObjectURL(pageUrlRef.current);
       if (pageUrl2Ref.current) URL.revokeObjectURL(pageUrl2Ref.current);
       if (nextPageUrlRef.current) URL.revokeObjectURL(nextPageUrlRef.current);
@@ -187,28 +196,77 @@ export default function Reader({ comicId, onBack }: { comicId: string; onBack: (
     await displayPage(parser, newIdx);
   }, [parser]);
 
-  const handleTap = (e: React.MouseEvent) => {
-    if (isZoomed) {
-      // If zoomed, tapping anywhere zooms out
-      setIsZoomed(false);
+  // Desktop click — just toggles the header UI (page turning = keyboard/swipe)
+  const handleTap = () => {
+    setShowUI(prev => !prev);
+  };
+
+  // Record touch start position and time
+  const handleTouchStart = (e: React.TouchEvent) => {
+    if (e.touches.length !== 1) return;
+    touchStartXRef.current = e.touches[0].clientX;
+    touchStartYRef.current = e.touches[0].clientY;
+    touchStartTimeRef.current = Date.now();
+  };
+
+  // Swipe → turn page; double-tap → zoom in/out; single tap → toggle UI
+  const handleTouchEnd = (e: React.TouchEvent) => {
+    if (e.changedTouches.length !== 1) return;
+    const dx = e.changedTouches[0].clientX - touchStartXRef.current;
+    const dy = e.changedTouches[0].clientY - touchStartYRef.current;
+    const dt = Date.now() - touchStartTimeRef.current;
+    const absX = Math.abs(dx);
+    const absY = Math.abs(dy);
+
+    // Horizontal swipe → turn page (disabled while zoomed so pan can work)
+    if (!isZoomedRef.current && absX > 50 && absX > absY * 1.5 && dt < 400) {
+      e.preventDefault();
+      if (dx > 0) handleTurnPage(-1);
+      else handleTurnPage(1);
       return;
     }
 
-    const { clientX } = e;
-    const { innerWidth } = window;
-    
-    // UI toggle zone (center 40%)
-    const xRatio = clientX / innerWidth;
-    if (xRatio > 0.3 && xRatio < 0.7) {
+    // Tap (minimal movement) — disambiguate single vs. double tap
+    if (absX < 15 && absY < 15) {
+      e.preventDefault(); // suppress the subsequent click event on mobile
+      const now = Date.now();
+      if (now - lastTapTimeRef.current < 300) {
+        // Double tap — toggle zoom
+        if (doubleTapTimerRef.current) {
+          clearTimeout(doubleTapTimerRef.current);
+          doubleTapTimerRef.current = null;
+        }
+        if (isZoomedRef.current) {
+          setIsZoomed(false);
+        } else {
+          const touch = e.changedTouches[0];
+          const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+          setZoomOrigin({
+            x: ((touch.clientX - rect.left) / rect.width) * 100,
+            y: ((touch.clientY - rect.top) / rect.height) * 100,
+          });
+          setIsZoomed(true);
+        }
+        lastTapTimeRef.current = 0;
+      } else {
+        // Single tap — wait 300 ms to confirm it is not the first of a double tap
+        lastTapTimeRef.current = now;
+        doubleTapTimerRef.current = setTimeout(() => {
+          setShowUI(prev => !prev);
+          doubleTapTimerRef.current = null;
+        }, 300);
+      }
+    }
+  };
+
+  // Touch end for the all-pages scrollable canvas — only toggles UI on tap
+  const handleTouchEndAllPages = (e: React.TouchEvent) => {
+    if (e.changedTouches.length !== 1) return;
+    const absX = Math.abs(e.changedTouches[0].clientX - touchStartXRef.current);
+    const absY = Math.abs(e.changedTouches[0].clientY - touchStartYRef.current);
+    if (absX < 15 && absY < 15) {
+      e.preventDefault();
       setShowUI(prev => !prev);
-      return;
-    }
-
-    // Page turning zones
-    if (xRatio <= 0.3) { // Left 30%
-      handleTurnPage(-1);
-    } else { // Right 30%
-      handleTurnPage(1);
     }
   };
 
@@ -257,7 +315,7 @@ export default function Reader({ comicId, onBack }: { comicId: string; onBack: (
       {/* Top Header UI */}
       <div 
         className={cn(
-          "absolute top-0 left-0 right-0 z-50 transform transition-transform duration-300 p-4 flex items-center justify-between",
+          "absolute top-0 left-0 right-0 z-50 transform transition-transform duration-300 p-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2",
           theme === 'dark' ? "bg-gradient-to-b from-black/80 to-transparent" : "bg-gradient-to-b from-white/90 to-transparent shadow-sm",
           showUI ? "translate-y-0" : "-translate-y-full"
         )}
@@ -279,7 +337,7 @@ export default function Reader({ comicId, onBack }: { comicId: string; onBack: (
           </div>
         </div>
 
-        <div className="flex items-center gap-1.5">
+        <div className="flex flex-wrap items-center gap-1.5">
           {/* Main mode: Single / Webtoon */}
           <div className={cn("flex items-center rounded border", theme === 'dark' ? 'border-white/10' : 'border-black/10')}>
             <button
@@ -363,6 +421,9 @@ export default function Reader({ comicId, onBack }: { comicId: string; onBack: (
               ? 'flex flex-row items-center overflow-x-auto'
               : 'flex flex-col items-center overflow-y-auto',
           )}
+          onTouchStart={handleTouchStart}
+          onTouchEnd={handleTouchEndAllPages}
+          onClick={() => setShowUI(prev => !prev)}
         >
           {isLoadingAll ? (
             <div className="flex items-center justify-center w-full h-full text-sm font-bold uppercase tracking-widest text-[#888]">
@@ -388,8 +449,10 @@ export default function Reader({ comicId, onBack }: { comicId: string; onBack: (
         <div
           onClick={handleTap}
           onDoubleClick={handleDoubleTap}
+          onTouchStart={handleTouchStart}
+          onTouchEnd={handleTouchEnd}
           className={cn(
-            'h-full w-full flex justify-center cursor-pointer',
+            'h-full w-full flex justify-center',
             readerMode === 'webtoon' ? 'items-start overflow-y-auto' : 'items-center overflow-hidden',
           )}
           style={{ cursor: isZoomed ? 'zoom-out' : 'default' }}

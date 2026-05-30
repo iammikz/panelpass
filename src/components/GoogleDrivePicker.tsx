@@ -16,47 +16,7 @@ type ImportableDriveFile = File & {
   };
 };
 
-interface AuthSession {
-  popup: Window | null;
-  redirectUri: string;
-  state: string;
-  verifier: string;
-}
-
-interface AuthMessage {
-  type: string;
-  code?: string;
-  error?: string;
-  state?: string;
-}
-
-interface TokenResponse {
-  access_token: string;
-  expires_in: number;
-}
-
-const AUTH_MESSAGE_TYPE = 'panelpass-google-drive-auth';
 const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.readonly';
-
-function base64UrlEncode(bytes: Uint8Array): string {
-  let value = '';
-
-  bytes.forEach((byte) => {
-    value += String.fromCharCode(byte);
-  });
-
-  return btoa(value).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
-}
-
-function createVerifier(): string {
-  return base64UrlEncode(crypto.getRandomValues(new Uint8Array(32)));
-}
-
-async function createChallenge(verifier: string): Promise<string> {
-  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
-
-  return base64UrlEncode(new Uint8Array(digest));
-}
 
 function formatBytes(value: number): string {
   if (value === 0) {
@@ -70,36 +30,7 @@ function formatBytes(value: number): string {
   return `${size >= 10 || index === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[index]}`;
 }
 
-async function exchangeCodeForToken(
-  clientId: string,
-  code: string,
-  verifier: string,
-  redirectUri: string,
-): Promise<TokenResponse> {
-  const response = await fetch('https://oauth2.googleapis.com/token', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-    },
-    body: new URLSearchParams({
-      client_id: clientId,
-      code,
-      code_verifier: verifier,
-      grant_type: 'authorization_code',
-      redirect_uri: redirectUri,
-    }),
-  });
-
-  if (!response.ok) {
-    throw new Error('Failed to finish Google Drive sign-in.');
-  }
-
-  return response.json() as Promise<TokenResponse>;
-}
-
 export default function GoogleDrivePicker({ onImport, importedDriveIds }: GoogleDrivePickerProps) {
-  const clientId = import.meta.env.VITE_GOOGLE_CLIENT_ID;
-  const authSessionRef = useRef<AuthSession | null>(null);
   const [isOpen, setIsOpen] = useState(false);
   const [accessToken, setAccessToken] = useState<string | null>(null);
   const [expiresAt, setExpiresAt] = useState<number | null>(null);
@@ -134,28 +65,6 @@ export default function GoogleDrivePicker({ onImport, importedDriveIds }: Google
   });
 
   useEffect(() => {
-    const searchParams = new URLSearchParams(window.location.search);
-    const code = searchParams.get('code');
-    const state = searchParams.get('state');
-    const authError = searchParams.get('error');
-
-    if (window.opener && (code || authError)) {
-      window.opener.postMessage(
-        {
-          type: AUTH_MESSAGE_TYPE,
-          code: code ?? undefined,
-          error: authError ?? undefined,
-          state: state ?? undefined,
-        } satisfies AuthMessage,
-        window.location.origin,
-      );
-
-      window.history.replaceState({}, document.title, window.location.pathname);
-      window.close();
-    }
-  }, []);
-
-  useEffect(() => {
     if (!expiresAt) {
       return undefined;
     }
@@ -171,55 +80,6 @@ export default function GoogleDrivePicker({ onImport, importedDriveIds }: Google
   useEffect(() => {
     setSelectedIds((current) => new Set([...current].filter((id) => !importedDriveIds.has(id))));
   }, [importedDriveIds]);
-
-  useEffect(() => {
-    const handleMessage = async (event: MessageEvent<AuthMessage>) => {
-      if (event.origin !== window.location.origin || event.data?.type !== AUTH_MESSAGE_TYPE) {
-        return;
-      }
-
-      const authSession = authSessionRef.current;
-
-      if (!authSession || event.data.state !== authSession.state) {
-        return;
-      }
-
-      authSession.popup?.close();
-      authSessionRef.current = null;
-      setIsAuthenticating(false);
-
-      if (event.data.error) {
-        setError('Google Drive sign-in was cancelled or denied.');
-        return;
-      }
-
-      if (!event.data.code || !clientId) {
-        setError('Google Drive sign-in did not return an authorization code.');
-        return;
-      }
-
-      try {
-        const tokenResponse = await exchangeCodeForToken(
-          clientId,
-          event.data.code,
-          authSession.verifier,
-          authSession.redirectUri,
-        );
-
-        setAccessToken(tokenResponse.access_token);
-        setExpiresAt(Date.now() + tokenResponse.expires_in * 1000);
-        setError(null);
-        setIsOpen(true);
-      } catch (authError) {
-        console.error(authError);
-        setError(authError instanceof Error ? authError.message : 'Failed to finish Google Drive sign-in.');
-      }
-    };
-
-    window.addEventListener('message', handleMessage);
-
-    return () => window.removeEventListener('message', handleMessage);
-  }, [clientId]);
 
   useEffect(() => {
     if (!isOpen || !accessToken) {
@@ -249,7 +109,7 @@ export default function GoogleDrivePicker({ onImport, importedDriveIds }: Google
 
       if (!folderId) {
         setFiles([]);
-        setFolderMessage('No `panelpass` folder found in your Google Drive. Create a folder named `panelpass` and add your comic files there.');
+        setFolderMessage('No \`panelpass\` folder found in your Google Drive. Create a folder named \`panelpass\` and add your comic files there.');
         return;
       }
 
@@ -257,7 +117,7 @@ export default function GoogleDrivePicker({ onImport, importedDriveIds }: Google
       setFiles(driveFiles);
 
       if (driveFiles.length === 0) {
-        setFolderMessage('No `.cbz` or `.cbr` files were found in your `panelpass` folder yet.');
+        setFolderMessage('No \`.cbz\` or \`.cbr\` files were found in your \`panelpass\` folder yet.');
       }
     } catch (loadError) {
       console.error(loadError);
@@ -269,56 +129,6 @@ export default function GoogleDrivePicker({ onImport, importedDriveIds }: Google
       setError(loadError instanceof Error ? loadError.message : 'Failed to load Google Drive files.');
     } finally {
       setIsLoadingFiles(false);
-    }
-  };
-
-  const beginAuth = async () => {
-    if (!clientId) {
-      setError('Set `VITE_GOOGLE_CLIENT_ID` in `.env.local` before connecting Google Drive.');
-      return;
-    }
-
-    setIsAuthenticating(true);
-    setError(null);
-
-    try {
-      const verifier = createVerifier();
-      const challenge = await createChallenge(verifier);
-      const state = crypto.randomUUID();
-      const redirectUri = `${window.location.origin}${window.location.pathname}`;
-      const popup = window.open('', 'panelpass-google-drive', 'popup,width=520,height=720');
-
-      if (!popup) {
-        throw new Error('Popup blocked. Allow popups for this site and try again.');
-      }
-
-      authSessionRef.current = {
-        popup,
-        redirectUri,
-        state,
-        verifier,
-      };
-
-      const authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
-
-      authUrl.search = new URLSearchParams({
-        client_id: clientId,
-        code_challenge: challenge,
-        code_challenge_method: 'S256',
-        redirect_uri: redirectUri,
-        response_type: 'code',
-        scope: DRIVE_SCOPE,
-        state,
-        prompt: 'consent',
-      }).toString();
-
-      popup.location.href = authUrl.toString();
-    } catch (authError) {
-      console.error(authError);
-      authSessionRef.current?.popup?.close();
-      authSessionRef.current = null;
-      setError(authError instanceof Error ? authError.message : 'Failed to start Google Drive sign-in.');
-      setIsAuthenticating(false);
     }
   };
 
@@ -475,7 +285,7 @@ export default function GoogleDrivePicker({ onImport, importedDriveIds }: Google
 
             <div className="border-b border-[#222] px-6 py-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between bg-[#111]">
               <p className="text-xs text-[#888] max-w-2xl">
-                Browse `.cbz` and `.cbr` files from your Google Drive `panelpass` folder and import them into local storage.
+                Browse .cbz and .cbr files from your Google Drive panelpass folder and import them into local storage.
               </p>
 
               <button

@@ -1,9 +1,17 @@
 import { useState, useEffect, useRef } from 'react';
 import { Upload, Trash2, CheckCircle2 } from 'lucide-react';
+import GoogleDrivePicker from './GoogleDrivePicker';
 import { getComics, saveComicFile, saveComicMetadata, deleteComic } from '../lib/db';
 import { ComicParser } from '../lib/parser';
 import { Comic } from '../types';
 import { generateId, cn } from '../lib/utils';
+
+type ImportableFile = File & {
+  driveMetadata?: {
+    id: string;
+    name: string;
+  };
+};
 
 export default function Library({ onOpenComic }: { onOpenComic: (id: string) => void }) {
   const [comics, setComics] = useState<Comic[]>([]);
@@ -19,6 +27,12 @@ export default function Library({ onOpenComic }: { onOpenComic: (id: string) => 
     const loaded = await getComics();
     setComics(loaded.sort((a, b) => b.addedAt - a.addedAt));
   };
+
+  const importedDriveIds = new Set(
+    comics
+      .filter((comic) => comic.source.type === 'google-drive')
+      .map((comic) => comic.source.driveFileId),
+  );
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -38,23 +52,31 @@ export default function Library({ onOpenComic }: { onOpenComic: (id: string) => 
     setIsUploading(true);
     setUploadError(null);
     try {
-      if (!file.name.toLowerCase().endsWith('.cbz') && !file.name.toLowerCase().endsWith('.zip')) {
-        throw new Error('Only .cbz and .zip files are supported right now.');
+      if (!file.name.toLowerCase().match(/\.(cbz|zip|cbr)$/i)) {
+        throw new Error('Only .cbz, .zip, and .cbr files are supported for import.');
       }
 
       const parser = new ComicParser();
       await parser.load(file);
       const totalPages = parser.getTotalPages();
       const coverImage = await parser.getCoverBase64();
+      const driveMetadata = (file as ImportableFile).driveMetadata;
 
       const newComic: Comic = {
         id: generateId(),
-        title: file.name.replace(/\.(cbz|zip)$/i, ''),
+        title: file.name.replace(/\.(cbz|zip|cbr)$/i, ''),
         addedAt: Date.now(),
         currentPage: 0,
         totalPages,
         coverImage,
         isCompleted: false,
+        source: driveMetadata
+          ? {
+              type: 'google-drive',
+              driveFileId: driveMetadata.id,
+              driveName: driveMetadata.name,
+            }
+          : { type: 'local' },
       };
 
       await saveComicFile(newComic.id, file);
@@ -87,7 +109,7 @@ export default function Library({ onOpenComic }: { onOpenComic: (id: string) => 
         <div className="flex items-center gap-6">
           <input 
             type="file" 
-            accept=".cbz,.zip" 
+            accept=".cbz,.zip,.cbr" 
             className="hidden" 
             ref={fileInputRef} 
             onChange={handleFileChange}
@@ -99,9 +121,11 @@ export default function Library({ onOpenComic }: { onOpenComic: (id: string) => 
           >
             <div className="transform skew-x-[12deg] flex items-center gap-2">
               <Upload size={16} />
-              {isUploading ? 'Uploading...' : 'Upload CBZ'}
+              {isUploading ? 'Uploading...' : 'Upload Comics'}
             </div>
           </button>
+
+          <GoogleDrivePicker onImport={processFile} importedDriveIds={importedDriveIds} />
         </div>
       </header>
 
@@ -124,9 +148,9 @@ export default function Library({ onOpenComic }: { onOpenComic: (id: string) => 
             onDrop={handleDrop}
           >
             <div className="text-5xl mb-4 group-hover:scale-125 transition-transform text-[#444] group-hover:text-cyan-400">+</div>
-            <h3 className="text-[14px] font-bold uppercase tracking-widest mb-2 text-[#888] group-hover:text-white transition-colors">Add CBZ/ZIP Files</h3>
+            <h3 className="text-[14px] font-bold uppercase tracking-widest mb-2 text-[#888] group-hover:text-white transition-colors">Add Comic Files</h3>
             <p className="text-[#555] text-xs text-center max-w-sm mt-2">
-              Drag and drop a comic file here, or click the upload button in the header.
+              Drag and drop a `.cbz`, `.zip`, or `.cbr` comic file here, or use the upload and Google Drive buttons in the header.
             </p>
           </div>
         ) : (
@@ -194,7 +218,7 @@ export default function Library({ onOpenComic }: { onOpenComic: (id: string) => 
               onClick={() => fileInputRef.current?.click()}
             >
               <span className="text-3xl text-[#555] group-hover:text-cyan-400 group-hover:scale-125 transition-all">+</span>
-              <span className="text-[10px] font-bold uppercase tracking-widest text-[#555] group-hover:text-cyan-400">Add CBZ/ZIP</span>
+              <span className="text-[10px] font-bold uppercase tracking-widest text-[#555] group-hover:text-cyan-400">Add Comic</span>
             </div>
           </div>
         )}

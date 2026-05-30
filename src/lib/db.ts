@@ -1,5 +1,5 @@
 import localforage from 'localforage';
-import { Comic } from '../types';
+import { Comic, ComicSource } from '../types';
 
 const metadataStorage = localforage.createInstance({
   name: 'PanelPass',
@@ -13,7 +13,29 @@ const fileStorage = localforage.createInstance({
 
 export async function getComics(): Promise<Comic[]> {
   const comics = await metadataStorage.getItem<Comic[]>('comics');
-  return comics || [];
+  if (!comics) {
+    return [];
+  }
+
+  let hasLegacyComics = false;
+  const normalizedComics = comics.map((comic) => {
+    if (comic.source) {
+      return comic;
+    }
+
+    hasLegacyComics = true;
+
+    return {
+      ...comic,
+      source: { type: 'local' } satisfies ComicSource,
+    };
+  });
+
+  if (hasLegacyComics) {
+    await metadataStorage.setItem('comics', normalizedComics);
+  }
+
+  return normalizedComics;
 }
 
 export async function saveComicFile(id: string, file: Blob) {

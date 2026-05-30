@@ -1,5 +1,9 @@
 export type Theme = 'light' | 'dark' | 'sepia';
 
+export type ComicSource =
+  | { type: 'local' }
+  | { type: 'google-drive'; driveFileId: string; driveName: string };
+
 export interface Comic {
   id: string; // UUID
   title: string;
@@ -8,6 +12,7 @@ export interface Comic {
   totalPages: number;
   coverImage?: string; // base64 or blob URL of the first page
   isCompleted: boolean;
+  source: ComicSource;
 }
 
 // Stored separately in IndexedDB to avoid loading huge blobs into memory everywhere

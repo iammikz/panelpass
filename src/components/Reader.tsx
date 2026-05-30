@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { ArrowLeft, Moon, Sun, Smartphone, LayoutPanelLeft } from 'lucide-react';
+import { ArrowLeft, Moon, Sun, Smartphone, LayoutPanelLeft, BookOpen, AlignJustify, GalleryVertical, GalleryHorizontal } from 'lucide-react';
 import { getComics, getComicFile, updateComicProgress } from '../lib/db';
 import { ComicParser } from '../lib/parser';
 import { Comic, Theme } from '../types';
@@ -7,29 +7,48 @@ import { cn } from '../lib/utils';
 import { useLocalStorage } from 'usehooks-ts';
 
 export default function Reader({ comicId, onBack }: { comicId: string; onBack: () => void }) {
+  type PageSubMode = 'single' | 'dual';
+  type WebtoonSubMode = 'single' | 'all-v' | 'all-h';
+
   const [comic, setComic] = useState<Comic | null>(null);
   const [parser, setParser] = useState<ComicParser | null>(null);
   const [pageUrl, setPageUrl] = useState<string>('');
+  const [pageUrl2, setPageUrl2] = useState<string>('');
   const [nextPageUrl, setNextPageUrl] = useState<string>('');
+  const [allPageUrls, setAllPageUrls] = useState<string[]>([]);
+  const [isLoadingAll, setIsLoadingAll] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  
+
   // UI State
   const [showUI, setShowUI] = useState(true);
   const [isZoomed, setIsZoomed] = useState(false);
   const [zoomOrigin, setZoomOrigin] = useState({ x: 50, y: 50 });
   const comicRef = useRef<Comic | null>(null);
+  const parserRef = useRef<ComicParser | null>(null);
   const pageUrlRef = useRef<string>('');
+  const pageUrl2Ref = useRef<string>('');
   const nextPageUrlRef = useRef<string>('');
+  const allPageUrlsRef = useRef<string[]>([]);
   const hideUITimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Keep comicRef in sync with the latest comic state on every render so that
-  // event handlers always read the most current page without stale closures.
+  // Keep refs in sync so stale closures always read fresh values
   comicRef.current = comic;
+  parserRef.current = parser;
 
   // Settings
   const [theme, setTheme] = useLocalStorage<Theme>('panelpass-theme', 'dark');
   const [readerMode, setReaderMode] = useLocalStorage<'single' | 'webtoon'>('panelpass-mode', 'single');
+  const [pageSubMode, setPageSubMode] = useLocalStorage<PageSubMode>('panelpass-page-submode', 'single');
+  const [webtoonSubMode, setWebtoonSubMode] = useLocalStorage<WebtoonSubMode>('panelpass-webtoon-submode', 'single');
+
+  // Refs for fresh reads from stale closures (displayPage, handleTurnPage)
+  const pageSubModeRef = useRef<PageSubMode>(pageSubMode);
+  pageSubModeRef.current = pageSubMode;
+  const readerModeRef = useRef<'single' | 'webtoon'>(readerMode);
+  readerModeRef.current = readerMode;
+
+  const isAllPages = readerMode === 'webtoon' && webtoonSubMode !== 'single';
 
   useEffect(() => {
     loadComicFiles();
@@ -37,9 +56,47 @@ export default function Reader({ comicId, onBack }: { comicId: string; onBack: (
       // Clean up object URLs on unmount using refs so the latest URLs are revoked
       if (hideUITimerRef.current) clearTimeout(hideUITimerRef.current);
       if (pageUrlRef.current) URL.revokeObjectURL(pageUrlRef.current);
+      if (pageUrl2Ref.current) URL.revokeObjectURL(pageUrl2Ref.current);
       if (nextPageUrlRef.current) URL.revokeObjectURL(nextPageUrlRef.current);
+      allPageUrlsRef.current.forEach((u) => URL.revokeObjectURL(u));
     };
   }, [comicId]);
+
+  // Load/unload all page blobs when switching in/out of webtoon-all mode
+  useEffect(() => {
+    if (isAllPages && parser) {
+      void loadAllPages(parser);
+    } else {
+      allPageUrlsRef.current.forEach((u) => URL.revokeObjectURL(u));
+      allPageUrlsRef.current = [];
+      setAllPageUrls([]);
+    }
+  }, [isAllPages, parser]);
+
+  // Re-display current page when sub-mode changes (e.g. single↔dual, webtoon-all→single)
+  useEffect(() => {
+    const p = parserRef.current;
+    const c = comicRef.current;
+    const inAllPages = readerModeRef.current === 'webtoon' && webtoonSubMode !== 'single';
+    if (p && c && !inAllPages) void displayPage(p, c.currentPage);
+  }, [pageSubMode, readerMode, webtoonSubMode]);
+
+  const loadAllPages = async (p: ComicParser) => {
+    setIsLoadingAll(true);
+    try {
+      const urls: string[] = [];
+      for (let i = 0; i < p.getTotalPages(); i++) {
+        urls.push(await p.getPageBlobUrl(i));
+      }
+      allPageUrlsRef.current.forEach((u) => URL.revokeObjectURL(u));
+      allPageUrlsRef.current = urls;
+      setAllPageUrls(urls);
+    } catch (e) {
+      console.error('Failed to load all pages', e);
+    } finally {
+      setIsLoadingAll(false);
+    }
+  };
 
   const loadComicFiles = async () => {
     try {
@@ -76,27 +133,49 @@ export default function Reader({ comicId, onBack }: { comicId: string; onBack: (
         pageUrlRef.current = url;
         return url;
       });
-      setIsZoomed(false); // Reset zoom on turn
-      
-      // Preload next page
-      if (index + 1 < p.getTotalPages()) {
-        const nextUrl = await p.getPageBlobUrl(index + 1);
+      setIsZoomed(false);
+
+      // Second page for dual mode (reads refs so always fresh even in stale closures)
+      const showDual = readerModeRef.current === 'single' && pageSubModeRef.current === 'dual';
+      if (showDual && index + 1 < p.getTotalPages()) {
+        const url2 = await p.getPageBlobUrl(index + 1);
+        setPageUrl2(prev => {
+          if (prev) URL.revokeObjectURL(prev);
+          pageUrl2Ref.current = url2;
+          return url2;
+        });
+      } else {
+        if (pageUrl2Ref.current) URL.revokeObjectURL(pageUrl2Ref.current);
+        pageUrl2Ref.current = '';
+        setPageUrl2('');
+      }
+
+      // Preload (skip ahead by 2 in dual mode)
+      const preloadIdx = index + (showDual ? 2 : 1);
+      if (preloadIdx < p.getTotalPages()) {
+        const nextUrl = await p.getPageBlobUrl(preloadIdx);
         setNextPageUrl(prev => {
           if (prev) URL.revokeObjectURL(prev);
           nextPageUrlRef.current = nextUrl;
           return nextUrl;
         });
+      } else {
+        if (nextPageUrlRef.current) URL.revokeObjectURL(nextPageUrlRef.current);
+        nextPageUrlRef.current = '';
+        setNextPageUrl('');
       }
-    } catch(e) {
-      console.error("Failed to load page image", e);
+    } catch (e) {
+      console.error('Failed to load page image', e);
     }
   };
 
   const handleTurnPage = useCallback(async (direction: number) => {
     const current = comicRef.current;
     if (!current || !parser) return;
-    
-    const newIdx = current.currentPage + direction;
+
+    // In dual mode each turn advances by 2 pages
+    const step = readerModeRef.current === 'single' && pageSubModeRef.current === 'dual' ? 2 : 1;
+    const newIdx = current.currentPage + direction * step;
     if (newIdx < 0 || newIdx >= current.totalPages) return;
 
     // Optimistic UI update
@@ -191,65 +270,174 @@ export default function Reader({ comicId, onBack }: { comicId: string; onBack: (
           <div className="overflow-hidden">
             <h2 className="font-bold italic uppercase tracking-tighter truncate sm:max-w-md max-w-[200px] text-lg">{comic?.title}</h2>
             <p className="text-[10px] font-bold uppercase tracking-widest text-[#888]">
-              Page {comic ? comic.currentPage + 1 : 0} of {comic?.totalPages}
+              {isAllPages
+                ? `All ${comic?.totalPages} pages`
+                : pageSubMode === 'dual' && readerMode === 'single'
+                  ? `Pages ${(comic?.currentPage ?? 0) + 1}–${Math.min((comic?.currentPage ?? 0) + 2, comic?.totalPages ?? 1)} of ${comic?.totalPages}`
+                  : `Page ${(comic?.currentPage ?? 0) + 1} of ${comic?.totalPages}`}
             </p>
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
-          {/* Layout Mode Toggles */}
-          <button 
-            onClick={() => setReaderMode('single')} 
-            className={cn("p-2 rounded-full", readerMode === 'single' && (theme === 'dark' ? "bg-white/10" : "bg-black/5"))}
-            title="Single Page Mode"
-          >
-            <LayoutPanelLeft size={20} />
-          </button>
-          <button 
-            onClick={() => setReaderMode('webtoon')} 
-            className={cn("p-2 rounded-full", readerMode === 'webtoon' && (theme === 'dark' ? "bg-white/10" : "bg-black/5"))}
-            title="Vertical Scroll Mode"
-          >
-            <Smartphone size={20} />
-          </button>
-          
-          <div className="w-px h-6 bg-gray-500/30 mx-1"></div>
+        <div className="flex items-center gap-1.5">
+          {/* Main mode: Single / Webtoon */}
+          <div className={cn("flex items-center rounded border", theme === 'dark' ? 'border-white/10' : 'border-black/10')}>
+            <button
+              onClick={() => setReaderMode('single')}
+              className={cn('p-2 transition-colors rounded-l', readerMode === 'single' ? (theme === 'dark' ? 'bg-white/15' : 'bg-black/10') : 'hover:bg-white/5')}
+              title="Page mode"
+            >
+              <LayoutPanelLeft size={18} />
+            </button>
+            <button
+              onClick={() => setReaderMode('webtoon')}
+              className={cn('p-2 transition-colors rounded-r', readerMode === 'webtoon' ? (theme === 'dark' ? 'bg-white/15' : 'bg-black/10') : 'hover:bg-white/5')}
+              title="Webtoon / scroll mode"
+            >
+              <Smartphone size={18} />
+            </button>
+          </div>
 
-          {/* Theme Toggles */}
-          <button onClick={() => setTheme('light')} className={cn("p-2 rounded-full", theme === 'light' && "bg-black/5")}><Sun size={20}/></button>
-          <button onClick={() => setTheme('dark')} className={cn("p-2 rounded-full", theme === 'dark' && "bg-white/10")}><Moon size={20}/></button>
-          <button onClick={() => setTheme('sepia')} className={cn("p-2 rounded-full font-serif font-bold w-10 text-center", theme === 'sepia' && "bg-black/5")}>S</button>
+          {/* Sub-mode buttons */}
+          <div className={cn("flex items-center rounded border", theme === 'dark' ? 'border-white/10' : 'border-black/10')}>
+            {readerMode === 'single' ? (
+              <>
+                <button
+                  onClick={() => setPageSubMode('single')}
+                  className={cn('p-2 transition-colors rounded-l', pageSubMode === 'single' ? (theme === 'dark' ? 'bg-white/15' : 'bg-black/10') : 'hover:bg-white/5')}
+                  title="Single page"
+                >
+                  <LayoutPanelLeft size={16} />
+                </button>
+                <button
+                  onClick={() => setPageSubMode('dual')}
+                  className={cn('p-2 transition-colors rounded-r', pageSubMode === 'dual' ? (theme === 'dark' ? 'bg-white/15' : 'bg-black/10') : 'hover:bg-white/5')}
+                  title="Dual page spread"
+                >
+                  <BookOpen size={16} />
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  onClick={() => setWebtoonSubMode('single')}
+                  className={cn('p-2 transition-colors rounded-l', webtoonSubMode === 'single' ? (theme === 'dark' ? 'bg-white/15' : 'bg-black/10') : 'hover:bg-white/5')}
+                  title="One page at a time"
+                >
+                  <AlignJustify size={16} />
+                </button>
+                <button
+                  onClick={() => setWebtoonSubMode('all-v')}
+                  className={cn('p-2 transition-colors', webtoonSubMode === 'all-v' ? (theme === 'dark' ? 'bg-white/15' : 'bg-black/10') : 'hover:bg-white/5')}
+                  title="All pages — vertical scroll"
+                >
+                  <GalleryVertical size={16} />
+                </button>
+                <button
+                  onClick={() => setWebtoonSubMode('all-h')}
+                  className={cn('p-2 transition-colors rounded-r', webtoonSubMode === 'all-h' ? (theme === 'dark' ? 'bg-white/15' : 'bg-black/10') : 'hover:bg-white/5')}
+                  title="All pages — horizontal scroll"
+                >
+                  <GalleryHorizontal size={16} />
+                </button>
+              </>
+            )}
+          </div>
+
+          <div className="w-px h-6 bg-gray-500/30 mx-0.5" />
+
+          {/* Theme */}
+          <button onClick={() => setTheme('light')} className={cn('p-2 rounded-full', theme === 'light' && 'bg-black/5')}><Sun size={20} /></button>
+          <button onClick={() => setTheme('dark')} className={cn('p-2 rounded-full', theme === 'dark' && 'bg-white/10')}><Moon size={20} /></button>
+          <button onClick={() => setTheme('sepia')} className={cn('p-2 rounded-full font-serif font-bold w-10 text-center', theme === 'sepia' && 'bg-black/5')}>S</button>
         </div>
       </div>
 
       {/* Reading Canvas */}
-      <div 
-        onClick={handleTap}
-        onDoubleClick={handleDoubleTap}
-        className={cn(
-          "h-full w-full flex justify-center cursor-pointer",
-          readerMode === 'webtoon' ? "items-start overflow-y-auto" : "items-center overflow-hidden"
-        )}
-        style={{
-          cursor: isZoomed ? 'zoom-out' : 'default'
-        }}
-      >
-        {pageUrl && (
-          <img 
-            src={pageUrl} 
-            alt="Comic Page" 
-            className={cn(
-              "transition-transform duration-300 ease-out",
-              readerMode === 'webtoon' ? "w-full max-w-3xl h-auto" : "h-full max-w-full object-contain"
-            )}
-            style={{
-              transform: isZoomed ? 'scale(2.5)' : 'scale(1)',
-              transformOrigin: `${zoomOrigin.x}% ${zoomOrigin.y}%`
-            }}
-            draggable={false}
-          />
-        )}
-      </div>
+      {isAllPages ? (
+        // Webtoon all-pages mode — scroll freely through all images
+        <div
+          className={cn(
+            'h-full w-full',
+            webtoonSubMode === 'all-h'
+              ? 'flex flex-row items-center overflow-x-auto'
+              : 'flex flex-col items-center overflow-y-auto',
+          )}
+        >
+          {isLoadingAll ? (
+            <div className="flex items-center justify-center w-full h-full text-sm font-bold uppercase tracking-widest text-[#888]">
+              Loading all pages…
+            </div>
+          ) : (
+            allPageUrls.map((url, i) => (
+              <img
+                key={i}
+                src={url}
+                alt={`Page ${i + 1}`}
+                className={cn(
+                  'object-contain flex-shrink-0',
+                  webtoonSubMode === 'all-h' ? 'h-full w-auto' : 'w-full max-w-3xl',
+                )}
+                draggable={false}
+              />
+            ))
+          )}
+        </div>
+      ) : (
+        // Single / Dual / Webtoon-single — tap-to-turn canvas
+        <div
+          onClick={handleTap}
+          onDoubleClick={handleDoubleTap}
+          className={cn(
+            'h-full w-full flex justify-center cursor-pointer',
+            readerMode === 'webtoon' ? 'items-start overflow-y-auto' : 'items-center overflow-hidden',
+          )}
+          style={{ cursor: isZoomed ? 'zoom-out' : 'default' }}
+        >
+          {pageSubMode === 'dual' && readerMode === 'single' ? (
+            // Dual-page spread
+            <div className="flex h-full w-full items-center justify-center overflow-hidden">
+              {pageUrl && (
+                <img
+                  src={pageUrl}
+                  alt="Left page"
+                  className="h-full w-1/2 object-contain transition-transform duration-300 ease-out"
+                  style={{
+                    transform: isZoomed ? 'scale(2.5)' : 'scale(1)',
+                    transformOrigin: `${zoomOrigin.x}% ${zoomOrigin.y}%`,
+                  }}
+                  draggable={false}
+                />
+              )}
+              {pageUrl2 && (
+                <img
+                  src={pageUrl2}
+                  alt="Right page"
+                  className="h-full w-1/2 object-contain"
+                  draggable={false}
+                />
+              )}
+            </div>
+          ) : (
+            // Single page or webtoon-single
+            pageUrl && (
+              <img
+                src={pageUrl}
+                alt="Comic Page"
+                className={cn(
+                  'transition-transform duration-300 ease-out',
+                  readerMode === 'webtoon' ? 'w-full max-w-3xl h-auto' : 'h-full max-w-full object-contain',
+                )}
+                style={{
+                  transform: isZoomed ? 'scale(2.5)' : 'scale(1)',
+                  transformOrigin: `${zoomOrigin.x}% ${zoomOrigin.y}%`,
+                }}
+                draggable={false}
+              />
+            )
+          )}
+        </div>
+      )}
 
       {/* Bottom Progress Bar UI */}
       <div 
@@ -265,8 +453,8 @@ export default function Reader({ comicId, onBack }: { comicId: string; onBack: (
           style={{ width: comic ? `${((comic.currentPage + 1) / comic.totalPages) * 100}%` : '0%' }}
         />
         
-        {/* Scrubber / Slider (Only visible when UI is shown) */}
-        {showUI && (
+        {/* Scrubber — hidden in all-pages mode since all pages are visible */}
+        {showUI && !isAllPages && (
           <div className={cn("absolute bottom-1 w-full px-4 py-8 flex items-center gap-4", theme === 'dark' ? "bg-gradient-to-t from-black/90 to-transparent" : "bg-gradient-to-t from-white/90 to-transparent")}>
             <span className="text-xs font-mono">{comic?.currentPage !== undefined ? comic.currentPage + 1 : 1}</span>
             <input 

@@ -197,7 +197,7 @@ export default function Library({ onOpenComic }: { onOpenComic: (id: string) => 
 
                     <button 
                       onClick={(e) => handleDelete(e, comic.id)}
-                      className="absolute top-2 left-2 z-20 bg-black/80 text-[#888] rounded p-2.5 sm:p-1.5 sm:opacity-0 sm:group-hover:opacity-100 hover:bg-black hover:text-red-500 hover:border-red-500 border border-[#333] transition-all"
+                      className="absolute top-2 left-2 z-20 bg-black/80 text-red-500 rounded p-2.5 sm:p-1.5 hover:bg-black hover:text-red-400 border border-red-500/50 hover:border-red-400 transition-all"
                       title="Delete comic"
                     >
                       <Trash2 size={16} className="sm:w-3.5 sm:h-3.5" />

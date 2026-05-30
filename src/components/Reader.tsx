@@ -259,14 +259,39 @@ export default function Reader({ comicId, onBack }: { comicId: string; onBack: (
     }
   };
 
-  // Touch end for the all-pages scrollable canvas — only toggles UI on tap
+  // Touch end for the all-pages scrollable canvas — single tap toggles UI, double-tap zooms
   const handleTouchEndAllPages = (e: React.TouchEvent) => {
     if (e.changedTouches.length !== 1) return;
     const absX = Math.abs(e.changedTouches[0].clientX - touchStartXRef.current);
     const absY = Math.abs(e.changedTouches[0].clientY - touchStartYRef.current);
     if (absX < 15 && absY < 15) {
       e.preventDefault();
-      setShowUI(prev => !prev);
+      const now = Date.now();
+      if (now - lastTapTimeRef.current < 300) {
+        // Double tap — toggle zoom
+        if (doubleTapTimerRef.current) {
+          clearTimeout(doubleTapTimerRef.current);
+          doubleTapTimerRef.current = null;
+        }
+        if (isZoomedRef.current) {
+          setIsZoomed(false);
+        } else {
+          const touch = e.changedTouches[0];
+          const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+          setZoomOrigin({
+            x: ((touch.clientX - rect.left) / rect.width) * 100,
+            y: ((touch.clientY - rect.top) / rect.height) * 100,
+          });
+          setIsZoomed(true);
+        }
+        lastTapTimeRef.current = 0;
+      } else {
+        lastTapTimeRef.current = now;
+        doubleTapTimerRef.current = setTimeout(() => {
+          setShowUI(prev => !prev);
+          doubleTapTimerRef.current = null;
+        }, 300);
+      }
     }
   };
 
@@ -306,7 +331,7 @@ export default function Reader({ comicId, onBack }: { comicId: string; onBack: (
     <div 
       className={cn(
         "fixed inset-0 select-none overflow-hidden transition-colors duration-300",
-        theme === 'dark' ? "bg-black text-gray-200" : theme === 'light' ? "bg-gray-100 text-gray-900" : "bg-[#f4ecd8] text-[#5c4a3d]"
+        theme === 'dark' ? "bg-black text-gray-200" : "bg-gray-100 text-gray-900"
       )}
     >
       {/* Hidden preload image */}
@@ -337,19 +362,19 @@ export default function Reader({ comicId, onBack }: { comicId: string; onBack: (
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-1.5">
+        <div className="flex flex-col sm:flex-row sm:items-center gap-1.5">
           {/* Main mode: Single / Webtoon */}
           <div className={cn("flex items-center rounded border", theme === 'dark' ? 'border-white/10' : 'border-black/10')}>
             <button
               onClick={() => setReaderMode('single')}
-              className={cn('p-2 transition-colors rounded-l', readerMode === 'single' ? (theme === 'dark' ? 'bg-white/15' : 'bg-black/10') : 'hover:bg-white/5')}
+              className={cn('p-2 transition-colors rounded-l', readerMode === 'single' ? 'bg-cyan-400/20 text-cyan-400' : 'hover:bg-white/5')}
               title="Page mode"
             >
               <LayoutPanelLeft size={18} />
             </button>
             <button
               onClick={() => setReaderMode('webtoon')}
-              className={cn('p-2 transition-colors rounded-r', readerMode === 'webtoon' ? (theme === 'dark' ? 'bg-white/15' : 'bg-black/10') : 'hover:bg-white/5')}
+              className={cn('p-2 transition-colors rounded-r', readerMode === 'webtoon' ? 'bg-cyan-400/20 text-cyan-400' : 'hover:bg-white/5')}
               title="Webtoon / scroll mode"
             >
               <Smartphone size={18} />
@@ -362,14 +387,14 @@ export default function Reader({ comicId, onBack }: { comicId: string; onBack: (
               <>
                 <button
                   onClick={() => setPageSubMode('single')}
-                  className={cn('p-2 transition-colors rounded-l', pageSubMode === 'single' ? (theme === 'dark' ? 'bg-white/15' : 'bg-black/10') : 'hover:bg-white/5')}
+                  className={cn('p-2 transition-colors rounded-l', pageSubMode === 'single' ? 'bg-cyan-400/20 text-cyan-400' : 'hover:bg-white/5')}
                   title="Single page"
                 >
                   <LayoutPanelLeft size={16} />
                 </button>
                 <button
                   onClick={() => setPageSubMode('dual')}
-                  className={cn('p-2 transition-colors rounded-r', pageSubMode === 'dual' ? (theme === 'dark' ? 'bg-white/15' : 'bg-black/10') : 'hover:bg-white/5')}
+                  className={cn('p-2 transition-colors rounded-r', pageSubMode === 'dual' ? 'bg-cyan-400/20 text-cyan-400' : 'hover:bg-white/5')}
                   title="Dual page spread"
                 >
                   <BookOpen size={16} />
@@ -379,21 +404,21 @@ export default function Reader({ comicId, onBack }: { comicId: string; onBack: (
               <>
                 <button
                   onClick={() => setWebtoonSubMode('single')}
-                  className={cn('p-2 transition-colors rounded-l', webtoonSubMode === 'single' ? (theme === 'dark' ? 'bg-white/15' : 'bg-black/10') : 'hover:bg-white/5')}
+                  className={cn('p-2 transition-colors rounded-l', webtoonSubMode === 'single' ? 'bg-cyan-400/20 text-cyan-400' : 'hover:bg-white/5')}
                   title="One page at a time"
                 >
                   <AlignJustify size={16} />
                 </button>
                 <button
                   onClick={() => setWebtoonSubMode('all-v')}
-                  className={cn('p-2 transition-colors', webtoonSubMode === 'all-v' ? (theme === 'dark' ? 'bg-white/15' : 'bg-black/10') : 'hover:bg-white/5')}
+                  className={cn('p-2 transition-colors', webtoonSubMode === 'all-v' ? 'bg-cyan-400/20 text-cyan-400' : 'hover:bg-white/5')}
                   title="All pages — vertical scroll"
                 >
                   <GalleryVertical size={16} />
                 </button>
                 <button
                   onClick={() => setWebtoonSubMode('all-h')}
-                  className={cn('p-2 transition-colors rounded-r', webtoonSubMode === 'all-h' ? (theme === 'dark' ? 'bg-white/15' : 'bg-black/10') : 'hover:bg-white/5')}
+                  className={cn('p-2 transition-colors rounded-r', webtoonSubMode === 'all-h' ? 'bg-cyan-400/20 text-cyan-400' : 'hover:bg-white/5')}
                   title="All pages — horizontal scroll"
                 >
                   <GalleryHorizontal size={16} />
@@ -402,12 +427,13 @@ export default function Reader({ comicId, onBack }: { comicId: string; onBack: (
             )}
           </div>
 
-          <div className="w-px h-6 bg-gray-500/30 mx-0.5" />
+          <div className="hidden sm:block w-px h-6 bg-gray-500/30 mx-0.5" />
 
           {/* Theme */}
-          <button onClick={() => setTheme('light')} className={cn('p-2 rounded-full', theme === 'light' && 'bg-black/5')}><Sun size={20} /></button>
-          <button onClick={() => setTheme('dark')} className={cn('p-2 rounded-full', theme === 'dark' && 'bg-white/10')}><Moon size={20} /></button>
-          <button onClick={() => setTheme('sepia')} className={cn('p-2 rounded-full font-serif font-bold w-10 text-center', theme === 'sepia' && 'bg-black/5')}>S</button>
+          <div className={cn("flex items-center rounded border", theme === 'dark' ? 'border-white/10' : 'border-black/10')}>
+            <button onClick={() => setTheme('light')} className={cn('p-2 transition-colors rounded-l', theme === 'light' ? 'bg-cyan-400/20 text-cyan-400' : 'hover:bg-white/5')} title="Light theme"><Sun size={18} /></button>
+            <button onClick={() => setTheme('dark')} className={cn('p-2 transition-colors rounded-r', theme === 'dark' ? 'bg-cyan-400/20 text-cyan-400' : 'hover:bg-white/5')} title="Dark theme"><Moon size={18} /></button>
+          </div>
         </div>
       </div>
 
@@ -423,25 +449,37 @@ export default function Reader({ comicId, onBack }: { comicId: string; onBack: (
           )}
           onTouchStart={handleTouchStart}
           onTouchEnd={handleTouchEndAllPages}
-          onClick={() => setShowUI(prev => !prev)}
+          onClick={handleTap}
+          onDoubleClick={handleDoubleTap}
         >
           {isLoadingAll ? (
             <div className="flex items-center justify-center w-full h-full text-sm font-bold uppercase tracking-widest text-[#888]">
               Loading all pages…
             </div>
           ) : (
-            allPageUrls.map((url, i) => (
-              <img
-                key={i}
-                src={url}
-                alt={`Page ${i + 1}`}
-                className={cn(
-                  'object-contain flex-shrink-0',
-                  webtoonSubMode === 'all-h' ? 'h-full w-auto' : 'w-full max-w-3xl',
-                )}
-                draggable={false}
-              />
-            ))
+            <div
+              className={cn(
+                'transition-transform duration-300 ease-out',
+                webtoonSubMode === 'all-h' ? 'flex flex-row items-center h-full' : 'flex flex-col items-center w-full',
+              )}
+              style={{
+                transform: isZoomed ? 'scale(1.5)' : 'scale(1)',
+                transformOrigin: `${zoomOrigin.x}% ${zoomOrigin.y}%`,
+              }}
+            >
+              {allPageUrls.map((url, i) => (
+                <img
+                  key={i}
+                  src={url}
+                  alt={`Page ${i + 1}`}
+                  className={cn(
+                    'object-contain flex-shrink-0',
+                    webtoonSubMode === 'all-h' ? 'h-full w-auto' : 'w-full max-w-3xl',
+                  )}
+                  draggable={false}
+                />
+              ))}
+            </div>
           )}
         </div>
       ) : (

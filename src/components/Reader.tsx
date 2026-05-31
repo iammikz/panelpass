@@ -32,6 +32,15 @@ export default function Reader({ comicId, onBack }: { comicId: string; onBack: (
   const allPageUrlsRef = useRef<string[]>([]);
   const hideUITimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isZoomedRef = useRef(false);
+  // All-pages scroll tracking
+  const [visiblePage, setVisiblePage] = useState(0);
+  const [isEditingPage, setIsEditingPage] = useState(false);
+  const [editPageInput, setEditPageInput] = useState('');
+  const editPageInputRef = useRef('');
+  editPageInputRef.current = editPageInput;
+  const allPagesScrollRef = useRef<HTMLDivElement>(null);
+  const pageImgRefs = useRef<(HTMLElement | null)[]>([]);
+  const pageCounterInputRef = useRef<HTMLInputElement>(null);
   // Touch gesture tracking
   const touchStartXRef = useRef(0);
   const touchStartYRef = useRef(0);
@@ -81,6 +90,31 @@ export default function Reader({ comicId, onBack }: { comicId: string; onBack: (
       setAllPageUrls([]);
     }
   }, [isAllPages, parser]);
+
+  // Track visible page in all-pages mode via IntersectionObserver
+  useEffect(() => {
+    if (!isAllPages || allPageUrls.length === 0) return;
+    const root = allPagesScrollRef.current;
+    if (!root) return;
+    const ratios = new Map<number, number>();
+    const elemToIdx = new Map<Element, number>();
+    const obs = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          const idx = elemToIdx.get(entry.target);
+          if (idx !== undefined) ratios.set(idx, entry.intersectionRatio);
+        });
+        let maxIdx = 0, maxRatio = -1;
+        ratios.forEach((ratio, idx) => { if (ratio > maxRatio) { maxRatio = ratio; maxIdx = idx; } });
+        setVisiblePage(maxIdx);
+      },
+      { root, threshold: [0, 0.25, 0.5, 0.75, 1] },
+    );
+    pageImgRefs.current.forEach((el, i) => {
+      if (el) { elemToIdx.set(el, i); obs.observe(el); }
+    });
+    return () => obs.disconnect();
+  }, [isAllPages, allPageUrls]);
 
   // Re-display current page when sub-mode changes (e.g. single↔dual, webtoon-all→single)
   useEffect(() => {
@@ -307,6 +341,28 @@ export default function Reader({ comicId, onBack }: { comicId: string; onBack: (
     }
   };
 
+  const handlePageCounterSubmit = useCallback(() => {
+    setIsEditingPage(false);
+    const c = comicRef.current;
+    if (!c) return;
+    const num = parseInt(editPageInputRef.current, 10);
+    if (isNaN(num)) return;
+    const idx = Math.max(0, Math.min(num - 1, c.totalPages - 1));
+    if (isAllPages) {
+      const el = pageImgRefs.current[idx];
+      if (el) {
+        el.scrollIntoView({
+          behavior: 'smooth',
+          block: webtoonSubMode === 'all-h' ? 'nearest' : 'start',
+          inline: webtoonSubMode === 'all-h' ? 'start' : 'nearest',
+        });
+      }
+      setVisiblePage(idx);
+    } else {
+      void handleTurnPage(idx - c.currentPage);
+    }
+  }, [isAllPages, webtoonSubMode, handleTurnPage]);
+
   // Keyboard navigation
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -441,6 +497,7 @@ export default function Reader({ comicId, onBack }: { comicId: string; onBack: (
       {isAllPages ? (
         // Webtoon all-pages mode — scroll freely through all images
         <div
+          ref={allPagesScrollRef}
           className={cn(
             'h-full w-full',
             webtoonSubMode === 'all-h'
@@ -470,6 +527,7 @@ export default function Reader({ comicId, onBack }: { comicId: string; onBack: (
               {allPageUrls.map((url, i) => (
                 <img
                   key={i}
+                  ref={(el) => { pageImgRefs.current[i] = el; }}
                   src={url}
                   alt={`Page ${i + 1}`}
                   className={cn(
@@ -540,17 +598,55 @@ export default function Reader({ comicId, onBack }: { comicId: string; onBack: (
         </div>
       )}
 
-      {/* Persistent page counter — always visible, never blocks interaction */}
-      {!isAllPages && comic && (
-        <div className="absolute bottom-4 right-4 z-40 pointer-events-none">
-          <span className={cn(
-            "text-xs font-mono px-2 py-1 rounded-sm opacity-70",
-            theme === 'dark' ? 'bg-black/70 text-gray-300' : 'bg-white/80 text-gray-700 shadow-sm'
-          )}>
-            {pageSubMode === 'dual' && readerMode === 'single'
-              ? `${comic.currentPage + 1}–${Math.min(comic.currentPage + 2, comic.totalPages)} / ${comic.totalPages}`
-              : `${comic.currentPage + 1} / ${comic.totalPages}`}
-          </span>
+      {/* Interactive page counter — always visible, tap to jump to page */}
+      {comic && (
+        <div
+          className="absolute bottom-4 right-4 z-50"
+          onClick={(e) => e.stopPropagation()}
+          onTouchEnd={(e) => e.stopPropagation()}
+        >
+          {isEditingPage ? (
+            <div className={cn(
+              'flex items-center gap-1 px-2 py-1 rounded-sm',
+              theme === 'dark' ? 'bg-black/85 text-gray-200' : 'bg-white/95 text-gray-800 shadow',
+            )}>
+              <input
+                ref={pageCounterInputRef}
+                type="number"
+                min={1}
+                max={comic.totalPages}
+                value={editPageInput}
+                onChange={(e) => setEditPageInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') handlePageCounterSubmit();
+                  if (e.key === 'Escape') setIsEditingPage(false);
+                  e.stopPropagation();
+                }}
+                onBlur={handlePageCounterSubmit}
+                className="w-10 bg-transparent text-xs font-mono text-right outline-none border-b border-cyan-400"
+              />
+              <span className="text-xs font-mono text-[#888]">/ {comic.totalPages}</span>
+            </div>
+          ) : (
+            <button
+              onClick={() => {
+                const current = isAllPages ? visiblePage : comic.currentPage;
+                setEditPageInput(String(current + 1));
+                setIsEditingPage(true);
+                setTimeout(() => pageCounterInputRef.current?.select(), 0);
+              }}
+              className={cn(
+                'text-xs font-mono px-2 py-1 rounded-sm opacity-70 hover:opacity-100 transition-opacity',
+                theme === 'dark' ? 'bg-black/70 text-gray-300' : 'bg-white/80 text-gray-700 shadow-sm',
+              )}
+            >
+              {isAllPages
+                ? `${visiblePage + 1} / ${comic.totalPages}`
+                : pageSubMode === 'dual' && readerMode === 'single'
+                  ? `${comic.currentPage + 1}–${Math.min(comic.currentPage + 2, comic.totalPages)} / ${comic.totalPages}`
+                  : `${comic.currentPage + 1} / ${comic.totalPages}`}
+            </button>
+          )}
         </div>
       )}
 

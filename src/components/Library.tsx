@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { Upload, Trash2, CheckCircle2, HelpCircle } from 'lucide-react';
+import { Upload, Trash2, CheckCircle2, HelpCircle, Settings } from 'lucide-react';
 import GoogleDrivePicker from './GoogleDrivePicker';
 import HowToUse, { STORAGE_KEY as HOWTO_STORAGE_KEY } from './HowToUse';
 import { getComics, saveComicFile, saveComicMetadata, deleteComic } from '../lib/db';
@@ -14,7 +14,7 @@ type ImportableFile = File & {
   };
 };
 
-export default function Library({ onOpenComic }: { onOpenComic: (id: string) => void }) {
+export default function Library({ onOpenComic, onOpenSettings }: { onOpenComic: (id: string) => void; onOpenSettings: () => void }) {
   const [comics, setComics] = useState<Comic[]>([]);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -138,6 +138,14 @@ export default function Library({ onOpenComic }: { onOpenComic: (id: string) => 
             title="How to use"
           >
             <HelpCircle size={18} />
+          </button>
+
+          <button
+            onClick={onOpenSettings}
+            className="border border-[#333] p-2 text-[#666] hover:border-cyan-400 hover:text-cyan-400 transition-colors"
+            title="Settings"
+          >
+            <Settings size={18} />
           </button>
         </div>
       </header>

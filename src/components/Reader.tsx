@@ -540,6 +540,20 @@ export default function Reader({ comicId, onBack }: { comicId: string; onBack: (
         </div>
       )}
 
+      {/* Persistent page counter — always visible, never blocks interaction */}
+      {!isAllPages && comic && (
+        <div className="absolute bottom-4 right-4 z-40 pointer-events-none">
+          <span className={cn(
+            "text-xs font-mono px-2 py-1 rounded-sm opacity-70",
+            theme === 'dark' ? 'bg-black/70 text-gray-300' : 'bg-white/80 text-gray-700 shadow-sm'
+          )}>
+            {pageSubMode === 'dual' && readerMode === 'single'
+              ? `${comic.currentPage + 1}–${Math.min(comic.currentPage + 2, comic.totalPages)} / ${comic.totalPages}`
+              : `${comic.currentPage + 1} / ${comic.totalPages}`}
+          </span>
+        </div>
+      )}
+
       {/* Bottom Progress Bar UI */}
       <div 
         className={cn(

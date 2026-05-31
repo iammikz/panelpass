@@ -347,7 +347,10 @@ export default function Reader({ comicId, onBack }: { comicId: string; onBack: (
     if (!c) return;
     const num = parseInt(editPageInputRef.current, 10);
     if (isNaN(num)) return;
-    const idx = Math.max(0, Math.min(num - 1, c.totalPages - 1));
+    let idx = Math.max(0, Math.min(num - 1, c.totalPages - 1));
+    // In dual-page mode snap to the left page of the spread (even 0-based index)
+    const isDual = readerModeRef.current === 'single' && pageSubModeRef.current === 'dual';
+    if (isDual && idx % 2 !== 0) idx -= 1;
     if (isAllPages) {
       const el = pageImgRefs.current[idx];
       if (el) {
@@ -612,7 +615,9 @@ export default function Reader({ comicId, onBack }: { comicId: string; onBack: (
             )}>
               <input
                 ref={pageCounterInputRef}
-                type="number"
+                type="text"
+                inputMode="numeric"
+                pattern="[0-9]*"
                 min={1}
                 max={comic.totalPages}
                 value={editPageInput}
@@ -626,6 +631,14 @@ export default function Reader({ comicId, onBack }: { comicId: string; onBack: (
                 className="w-10 bg-transparent text-xs font-mono text-right outline-none border-b border-cyan-400"
               />
               <span className="text-xs font-mono text-[#888]">/ {comic.totalPages}</span>
+              <button
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={handlePageCounterSubmit}
+                className="ml-1 text-cyan-400 text-xs font-bold px-1.5 py-0.5 rounded hover:bg-cyan-400/20 active:bg-cyan-400/30"
+                aria-label="Go to page"
+              >
+                ✓
+              </button>
             </div>
           ) : (
             <button

@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react';
 import { useGoogleLogin } from '@react-oauth/google';
 import { Check, Cloud, Download, LoaderCircle, LogOut, RefreshCw, X } from 'lucide-react';
-import { downloadDriveFile, DriveFile, findPanelpassFolder, listComicsInFolder } from '../lib/googleDrive';
+import { downloadDriveFile, DRIVE_SCOPE, DriveFile, findPanelpassFolder, listComicsInFolder } from '../lib/googleDrive';
 import { cn } from '../lib/utils';
 
 interface GoogleDrivePickerProps {
   onImport: (file: File) => Promise<void>;
   importedDriveIds: Set<string>;
+  onTokenChange: (token: string | null, expiresAt: number | null) => void;
 }
 
 type ImportableDriveFile = File & {
@@ -15,8 +16,6 @@ type ImportableDriveFile = File & {
     name: string;
   };
 };
-
-const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.readonly';
 
 function formatBytes(value: number): string {
   if (value === 0) {
@@ -30,7 +29,7 @@ function formatBytes(value: number): string {
   return `${size >= 10 || index === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[index]}`;
 }
 
-export default function GoogleDrivePicker({ onImport, importedDriveIds }: GoogleDrivePickerProps) {
+export default function GoogleDrivePicker({ onImport, importedDriveIds, onTokenChange }: GoogleDrivePickerProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [accessToken, setAccessToken] = useState<string | null>(null);
   const [expiresAt, setExpiresAt] = useState<number | null>(null);
@@ -45,11 +44,13 @@ export default function GoogleDrivePicker({ onImport, importedDriveIds }: Google
 
   const login = useGoogleLogin({
     onSuccess: ({ access_token, expires_in }) => {
+      const expiry = Date.now() + (expires_in ?? 3600) * 1000;
       setAccessToken(access_token);
-      setExpiresAt(Date.now() + (expires_in ?? 3600) * 1000);
+      setExpiresAt(expiry);
       setIsAuthenticating(false);
       setError(null);
       setIsOpen(true);
+      onTokenChange(access_token, expiry);
     },
     onError: () => {
       setError('Google Drive sign-in failed.');
@@ -96,6 +97,7 @@ export default function GoogleDrivePicker({ onImport, importedDriveIds }: Google
     setSelectedIds(new Set());
     setImportingIds(new Set());
     setFileErrors({});
+    onTokenChange(null, null);
   };
 
   const loadDriveFiles = async (token: string) => {

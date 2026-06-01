@@ -2,10 +2,11 @@ import { useState, useEffect, useRef } from 'react';
 import { Upload, Trash2, CheckCircle2, HelpCircle, Settings } from 'lucide-react';
 import GoogleDrivePicker from './GoogleDrivePicker';
 import HowToUse, { STORAGE_KEY as HOWTO_STORAGE_KEY } from './HowToUse';
-import { getComics, saveComicFile, saveComicMetadata, deleteComic } from '../lib/db';
+import { getComics, saveComicFile, saveComicMetadata, deleteComic, updateComicProgress } from '../lib/db';
 import { ComicParser } from '../lib/parser';
 import { Comic } from '../types';
 import { generateId, cn } from '../lib/utils';
+import { readLastViewedCSV } from '../lib/googleDrive';
 
 type ImportableFile = File & {
   driveMetadata?: {
@@ -14,7 +15,19 @@ type ImportableFile = File & {
   };
 };
 
-export default function Library({ onOpenComic, onOpenSettings }: { onOpenComic: (id: string) => void; onOpenSettings: () => void }) {
+export default function Library({
+  onOpenComic,
+  onOpenSettings,
+  driveToken,
+  driveEnabled,
+  onDriveTokenChange,
+}: {
+  onOpenComic: (id: string) => void;
+  onOpenSettings: () => void;
+  driveToken: string | null;
+  driveEnabled: boolean;
+  onDriveTokenChange: (token: string | null, expiresAt: number | null) => void;
+}) {
   const [comics, setComics] = useState<Comic[]>([]);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -27,6 +40,32 @@ export default function Library({ onOpenComic, onOpenSettings }: { onOpenComic: 
       setShowHowToUse(true);
     }
   }, []);
+
+  // Restore reading progress from Drive CSV when Drive is connected
+  useEffect(() => {
+    if (!driveToken || !driveEnabled || comics.length === 0) return;
+    void (async () => {
+      try {
+        const { entries } = await readLastViewedCSV(driveToken);
+        if (entries.size === 0) return;
+        const updates: Array<{ id: string; page: number }> = [];
+        entries.forEach((page, id) => {
+          const comic = comics.find((c) => c.id === id);
+          if (comic && comic.currentPage !== page) updates.push({ id, page });
+        });
+        if (updates.length === 0) return;
+        await Promise.all(updates.map(({ id, page }) => updateComicProgress(id, page)));
+        setComics((prev) =>
+          prev.map((c) => {
+            const update = updates.find((u) => u.id === c.id);
+            return update ? { ...c, currentPage: update.page } : c;
+          }),
+        );
+      } catch (e) {
+        console.error('Failed to restore progress from Drive CSV:', e);
+      }
+    })();
+  }, [driveToken, driveEnabled, comics.length]);
 
   const loadComics = async () => {
     const loaded = await getComics();
@@ -130,7 +169,7 @@ export default function Library({ onOpenComic, onOpenSettings }: { onOpenComic: 
             </div>
           </button>
 
-          <GoogleDrivePicker onImport={processFile} importedDriveIds={importedDriveIds} />
+          <GoogleDrivePicker onImport={processFile} importedDriveIds={importedDriveIds} onTokenChange={onDriveTokenChange} />
 
           <button
             onClick={() => setShowHowToUse(true)}

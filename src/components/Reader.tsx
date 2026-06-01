@@ -5,8 +5,19 @@ import { ComicParser } from '../lib/parser';
 import { Comic, Theme } from '../types';
 import { cn } from '../lib/utils';
 import { useLocalStorage } from 'usehooks-ts';
+import { readLastViewedCSV, writeLastViewedCSV } from '../lib/googleDrive';
 
-export default function Reader({ comicId, onBack }: { comicId: string; onBack: () => void }) {
+export default function Reader({
+  comicId,
+  onBack,
+  driveToken,
+  driveEnabled,
+}: {
+  comicId: string;
+  onBack: () => void;
+  driveToken?: string | null;
+  driveEnabled?: boolean;
+}) {
   type PageSubMode = 'single' | 'dual';
   type WebtoonSubMode = 'single' | 'all-v' | 'all-h';
 
@@ -42,6 +53,11 @@ export default function Reader({ comicId, onBack }: { comicId: string; onBack: (
   const pageImgRefs = useRef<(HTMLElement | null)[]>([]);
   const pageCounterInputRef = useRef<HTMLInputElement>(null);
   const saveProgressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const driveWriteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const driveTokenRef = useRef<string | null>(driveToken ?? null);
+  const driveEnabledRef = useRef<boolean>(driveEnabled ?? false);
+  driveTokenRef.current = driveToken ?? null;
+  driveEnabledRef.current = driveEnabled ?? false;
   // Touch gesture tracking
   const touchStartXRef = useRef(0);
   const touchStartYRef = useRef(0);
@@ -68,6 +84,22 @@ export default function Reader({ comicId, onBack }: { comicId: string; onBack: (
 
   const isAllPages = readerMode === 'webtoon' && webtoonSubMode !== 'single';
 
+  const scheduleDriveWrite = (comicId: string, page: number) => {
+    if (!driveEnabledRef.current || !driveTokenRef.current) return;
+    if (driveWriteTimerRef.current) clearTimeout(driveWriteTimerRef.current);
+    driveWriteTimerRef.current = setTimeout(async () => {
+      const token = driveTokenRef.current;
+      if (!token) return;
+      try {
+        const { fileId, entries } = await readLastViewedCSV(token);
+        entries.set(comicId, page);
+        await writeLastViewedCSV(token, fileId, entries);
+      } catch (e) {
+        console.error('Failed to sync progress to Drive:', e);
+      }
+    }, 2000);
+  };
+
   useEffect(() => {
     loadComicFiles();
     return () => {
@@ -75,6 +107,7 @@ export default function Reader({ comicId, onBack }: { comicId: string; onBack: (
       if (hideUITimerRef.current) clearTimeout(hideUITimerRef.current);
       if (doubleTapTimerRef.current) clearTimeout(doubleTapTimerRef.current);
       if (saveProgressTimerRef.current) clearTimeout(saveProgressTimerRef.current);
+      if (driveWriteTimerRef.current) clearTimeout(driveWriteTimerRef.current);
       if (pageUrlRef.current) URL.revokeObjectURL(pageUrlRef.current);
       if (pageUrl2Ref.current) URL.revokeObjectURL(pageUrl2Ref.current);
       if (nextPageUrlRef.current) URL.revokeObjectURL(nextPageUrlRef.current);
@@ -130,6 +163,7 @@ export default function Reader({ comicId, onBack }: { comicId: string; onBack: (
     saveProgressTimerRef.current = setTimeout(() => {
       updateComicProgress(c.id, visiblePage).catch(console.error);
     }, 600);
+    scheduleDriveWrite(c.id, visiblePage);
   }, [visiblePage, isAllPages]);
 
   // Re-display current page when sub-mode changes (e.g. single↔dual, webtoon-all→single)
@@ -242,6 +276,7 @@ export default function Reader({ comicId, onBack }: { comicId: string; onBack: (
     
     // Save progress asynchronously
     updateComicProgress(current.id, newIdx).catch(console.error);
+    scheduleDriveWrite(current.id, newIdx);
     
     await displayPage(parser, newIdx);
   }, [parser]);
@@ -382,6 +417,7 @@ export default function Reader({ comicId, onBack }: { comicId: string; onBack: (
       // (turn count × step would give the wrong result in dual-page mode)
       setComic(prev => prev ? { ...prev, currentPage: idx } : null);
       updateComicProgress(c.id, idx).catch(console.error);
+      scheduleDriveWrite(c.id, idx);
       void displayPage(parserRef.current!, idx);
     }
   }, [isAllPages, webtoonSubMode]);

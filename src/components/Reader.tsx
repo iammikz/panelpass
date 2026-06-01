@@ -41,6 +41,7 @@ export default function Reader({ comicId, onBack }: { comicId: string; onBack: (
   const allPagesScrollRef = useRef<HTMLDivElement>(null);
   const pageImgRefs = useRef<(HTMLElement | null)[]>([]);
   const pageCounterInputRef = useRef<HTMLInputElement>(null);
+  const saveProgressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Touch gesture tracking
   const touchStartXRef = useRef(0);
   const touchStartYRef = useRef(0);
@@ -73,6 +74,7 @@ export default function Reader({ comicId, onBack }: { comicId: string; onBack: (
       // Clean up object URLs on unmount using refs so the latest URLs are revoked
       if (hideUITimerRef.current) clearTimeout(hideUITimerRef.current);
       if (doubleTapTimerRef.current) clearTimeout(doubleTapTimerRef.current);
+      if (saveProgressTimerRef.current) clearTimeout(saveProgressTimerRef.current);
       if (pageUrlRef.current) URL.revokeObjectURL(pageUrlRef.current);
       if (pageUrl2Ref.current) URL.revokeObjectURL(pageUrl2Ref.current);
       if (nextPageUrlRef.current) URL.revokeObjectURL(nextPageUrlRef.current);
@@ -115,6 +117,20 @@ export default function Reader({ comicId, onBack }: { comicId: string; onBack: (
     });
     return () => obs.disconnect();
   }, [isAllPages, allPageUrls]);
+
+  // Save progress when visible page changes in all-pages scroll mode
+  useEffect(() => {
+    if (!isAllPages) return;
+    const c = comicRef.current;
+    if (!c) return;
+    // Keep comic state in sync so header/scrubber reflects scroll position
+    setComic(prev => prev ? { ...prev, currentPage: visiblePage } : null);
+    // Debounce the IndexedDB write to avoid hammering on every scroll tick
+    if (saveProgressTimerRef.current) clearTimeout(saveProgressTimerRef.current);
+    saveProgressTimerRef.current = setTimeout(() => {
+      updateComicProgress(c.id, visiblePage).catch(console.error);
+    }, 600);
+  }, [visiblePage, isAllPages]);
 
   // Re-display current page when sub-mode changes (e.g. single↔dual, webtoon-all→single)
   useEffect(() => {
@@ -362,9 +378,13 @@ export default function Reader({ comicId, onBack }: { comicId: string; onBack: (
       }
       setVisiblePage(idx);
     } else {
-      void handleTurnPage(idx - c.currentPage);
+      // Direct jump — bypass handleTurnPage which treats its arg as a turn count
+      // (turn count × step would give the wrong result in dual-page mode)
+      setComic(prev => prev ? { ...prev, currentPage: idx } : null);
+      updateComicProgress(c.id, idx).catch(console.error);
+      void displayPage(parserRef.current!, idx);
     }
-  }, [isAllPages, webtoonSubMode, handleTurnPage]);
+  }, [isAllPages, webtoonSubMode]);
 
   // Keyboard navigation
   useEffect(() => {

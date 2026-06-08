@@ -1,47 +1,73 @@
-# PanelPass
+<p align="center">
+  <img src="assets/panelpass-logo.svg" width="128" alt="PanelPass tilted P logo" />
+</p>
 
-PanelPass is a browser-based comic reader for `.cbz`, `.zip`, and `.cbr` files. It runs as a React/Vite single-page app, stores comics locally in IndexedDB by default, and can optionally import or store comics through a user-owned Google Drive folder.
+<h1 align="center">PanelPass</h1>
 
-The app has no backend, no server-side accounts, and no database service. Reading, parsing, progress tracking, and storage all happen in the browser.
+<p align="center">
+  <strong>A local-first comic reader for your browser.</strong>
+  <br />
+  Read <code>.cbz</code>, <code>.zip</code>, and <code>.cbr</code> comics with no backend, no server-side accounts, and no database service.
+</p>
 
-## Features
+<p align="center">
+  <img alt="React" src="https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react&logoColor=000" />
+  <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-5.8-3178C6?style=flat-square&logo=typescript&logoColor=fff" />
+  <img alt="Vite" src="https://img.shields.io/badge/Vite-6-646CFF?style=flat-square&logo=vite&logoColor=fff" />
+  <img alt="Tailwind CSS" src="https://img.shields.io/badge/Tailwind_CSS-v4-06B6D4?style=flat-square&logo=tailwindcss&logoColor=fff" />
+</p>
 
-- Import `.cbz`, `.zip`, and `.cbr` comic archives
-- Drag-and-drop or file-picker local uploads
-- Optional Google Drive picker for files in a `panelpass` Drive folder
-- Optional Google Drive cloud storage mode that extracts pages to `panelpass/extracted/comics/<comic-title>/`
-- Bookshelf grid with cover thumbnails, progress bars, completion indicators, delete controls, and reading stats
-- Sort bookshelf by comic name or recently viewed
-- Single-page reading mode
-- Dual-page spread mode
-- Webtoon mode with one-page, all-pages vertical, and all-pages horizontal layouts
-- Light and dark reader themes
-- Tap/click UI toggle, double-tap or double-click zoom, swipe navigation, keyboard navigation, and page jumping
-- Reading progress saved locally, with optional Google Drive progress sync through `panelpass/config/lastViewed.csv`
+---
 
-## Storage Modes
+## ✨ What It Does
 
-### Local Storage
+PanelPass is a React/Vite single-page app that parses comic archives directly in the browser. By default, your library lives in IndexedDB on your device. If you want cross-device access, you can connect Google Drive and store extracted pages in your own Drive folder.
 
-By default, PanelPass saves comic metadata and archive blobs in the browser through IndexedDB via `localforage`.
+| Area | Highlights |
+| --- | --- |
+| 📚 Library | Cover grid, drag-and-drop uploads, progress bars, completion marks, delete controls, reading stats |
+| 🧭 Sorting | Sort by comic name or recently viewed |
+| 📖 Reader | Single page, dual-page spread, one-page webtoon, all-pages vertical scroll, all-pages horizontal scroll |
+| 🔎 Navigation | Keyboard shortcuts, swipe gestures, page scrubber, direct page jump |
+| 🧩 Zoom | Double-click or double-tap panel zoom |
+| 🎨 Themes | Light and dark reader themes |
+| ☁️ Drive | Optional Drive import, optional extracted cloud storage, optional progress sync |
 
-This mode works offline after import and does not upload your local files anywhere. Clearing browser site data can remove the saved library.
+## 🗂️ Supported Formats
 
-### Google Drive Import
+- `.cbz`
+- `.zip`
+- `.cbr`
 
-The Google Drive picker scans a folder named exactly `panelpass` in the signed-in user's Drive and lists `.cbz` and `.cbr` files. Imported Drive files can be saved into the local browser library.
+CBZ/ZIP parsing uses `jszip`. CBR/RAR parsing uses `node-unrar-js`.
 
-### Google Drive Cloud Storage
+## 💾 Storage Modes
 
-When Google Drive Cloud Storage is enabled in Settings, imported comics are extracted page-by-page and uploaded to:
+### 🖥️ Local Storage
+
+The default mode saves comic metadata and archive blobs in browser IndexedDB through `localforage`.
+
+Local mode works offline after import and does not upload your files anywhere. Clearing browser site data can remove the saved library.
+
+### ☁️ Google Drive Import
+
+The Drive picker scans a folder named exactly `panelpass` in the signed-in user's Google Drive and lists `.cbz` and `.cbr` files. Imported Drive files can be copied into the local browser library.
+
+### 🌐 Google Drive Cloud Storage
+
+When Google Drive Cloud Storage is enabled in Settings, PanelPass extracts each imported comic page and uploads the page library to:
 
 ```text
 panelpass/extracted/comics/<comic-title>/
 ```
 
-Each extracted comic folder contains individual page images and a `metadata.json` file. The bookshelf can then load that extracted library from Drive on another device after connecting the same Google account.
+Each extracted comic folder contains page images and a `metadata.json` file. Reading progress can also sync through:
 
-## Tech Stack
+```text
+panelpass/config/lastViewed.csv
+```
+
+## 🛠️ Tech Stack
 
 - React 19
 - TypeScript
@@ -53,7 +79,7 @@ Each extracted comic folder contains individual page images and a `metadata.json
 - Google OAuth through `@react-oauth/google`
 - Icons from `lucide-react`
 
-## Getting Started
+## 🚀 Getting Started
 
 ### Prerequisites
 
@@ -74,7 +100,7 @@ npm run dev
 
 The Vite dev server runs on `http://localhost:3000` and listens on `0.0.0.0`.
 
-## Google Drive Setup
+## 🔐 Google Drive Setup
 
 Google Drive is optional. Local uploads work without any environment variables.
 
@@ -93,7 +119,7 @@ VITE_GOOGLE_CLIENT_ID=your-google-oauth-client-id
 
 PanelPass requests Drive readonly and Drive file scopes so it can list/download comics from the `panelpass` folder and create/update its own extracted comic and progress files.
 
-## Available Scripts
+## 📜 Scripts
 
 ```bash
 npm run dev      # start Vite on port 3000
@@ -103,7 +129,7 @@ npm run lint     # run TypeScript with no emit
 npm run clean    # remove dist/ and server.js
 ```
 
-## Project Structure
+## 🧱 Project Structure
 
 ```text
 src/
@@ -122,12 +148,12 @@ src/
     utils.ts                      # Class merging, ID generation, formatting
 ```
 
-## Privacy Notes
+## 🔒 Privacy
 
-PanelPass is designed to be local-first. In local storage mode, comic archives remain in the browser's IndexedDB on the current device.
+PanelPass is local-first. In local storage mode, comic archives remain in the current browser's IndexedDB.
 
-Google Drive features only run after the user connects a Google account. In Drive cloud storage mode, imported comics are extracted and uploaded to the user's own Google Drive under the `panelpass` folder.
+Google Drive features only run after you connect a Google account. In Drive cloud storage mode, imported comics are extracted and uploaded to your own Google Drive under the `panelpass` folder.
 
-## License
+## 📄 License
 
 See [LICENSE](LICENSE).

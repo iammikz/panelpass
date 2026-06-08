@@ -7,8 +7,6 @@ import { cn } from '../lib/utils';
 interface GoogleDrivePickerProps {
   onImport: (file: File) => Promise<void>;
   importedDriveIds: Set<string>;
-  onTokenChange: (token: string | null, expiresAt: number | null) => void;
-  driveStorageEnabled: boolean;
 }
 
 type ImportableDriveFile = File & {
@@ -30,7 +28,7 @@ function formatBytes(value: number): string {
   return `${size >= 10 || index === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[index]}`;
 }
 
-export default function GoogleDrivePicker({ onImport, importedDriveIds, onTokenChange, driveStorageEnabled }: GoogleDrivePickerProps) {
+export default function GoogleDrivePicker({ onImport, importedDriveIds }: GoogleDrivePickerProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [accessToken, setAccessToken] = useState<string | null>(null);
   const [expiresAt, setExpiresAt] = useState<number | null>(null);
@@ -51,7 +49,6 @@ export default function GoogleDrivePicker({ onImport, importedDriveIds, onTokenC
       setIsAuthenticating(false);
       setError(null);
       setIsOpen(true);
-      onTokenChange(access_token, expiry);
     },
     onError: () => {
       setError('Google Drive sign-in failed.');
@@ -98,7 +95,6 @@ export default function GoogleDrivePicker({ onImport, importedDriveIds, onTokenC
     setSelectedIds(new Set());
     setImportingIds(new Set());
     setFileErrors({});
-    onTokenChange(null, null);
   };
 
   const loadDriveFiles = async (token: string) => {
@@ -288,9 +284,7 @@ export default function GoogleDrivePicker({ onImport, importedDriveIds, onTokenC
 
             <div className="border-b border-[#222] px-6 py-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between bg-[#111]">
               <p className="text-xs text-[#888] max-w-2xl">
-                {driveStorageEnabled
-                  ? 'Browse .cbz and .cbr files from your Google Drive panelpass folder, extract them, and save the page library under panelpass/extracted/comics/.'
-                  : 'Browse .cbz and .cbr files from your Google Drive panelpass folder and import them into local browser storage.'}
+                Browse .cbz and .cbr files from your Google Drive panelpass folder and import them into local browser storage.
               </p>
 
               <button

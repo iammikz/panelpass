@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { ArrowLeft, HardDrive, Cloud, Info } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { useLocalStorage } from 'usehooks-ts';
@@ -6,6 +7,13 @@ export const DRIVE_STORAGE_KEY = 'panelpass-drive-storage';
 
 export default function Settings({ onBack }: { onBack: () => void }) {
   const [driveStorage, setDriveStorage] = useLocalStorage<boolean>(DRIVE_STORAGE_KEY, false);
+  const isDriveStorageAvailable = false;
+
+  useEffect(() => {
+    if (driveStorage) {
+      setDriveStorage(false);
+    }
+  }, [driveStorage, setDriveStorage]);
 
   return (
     <div className="flex flex-col min-h-screen bg-[#0D0D0D] text-[#F0F0F0] font-sans">
@@ -26,95 +34,59 @@ export default function Settings({ onBack }: { onBack: () => void }) {
         <section>
           <h2 className="text-xs font-bold uppercase tracking-widest text-[#888] mb-4">Storage</h2>
 
-          <div className={cn(
-            "border rounded-lg overflow-hidden",
-            driveStorage ? "border-cyan-400/30" : "border-[#2A2A2A]"
-          )}>
+          <div className="border rounded-lg overflow-hidden border-[#2A2A2A]">
             {/* Toggle row */}
             <div className="flex items-center justify-between gap-4 p-5 bg-[#111]">
               <div className="flex items-center gap-3">
-                {driveStorage
-                  ? <Cloud size={22} className="text-cyan-400 shrink-0" />
-                  : <HardDrive size={22} className="text-[#666] shrink-0" />
-                }
+                <Cloud size={22} className="text-[#666] shrink-0" />
                 <div>
-                  <p className="font-bold text-sm">Google Drive Cloud Storage</p>
-                  <p className="text-xs text-[#888] mt-0.5">
-                    {driveStorage
-                      ? 'Active — extracted pages saved to your Drive'
-                      : 'Off — comics saved to this device'}
-                  </p>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="font-bold text-sm">Google Drive Cloud Storage</p>
+                    <span className="rounded border border-amber-400/30 bg-amber-400/10 px-2 py-0.5 text-[10px] font-black uppercase tracking-widest text-amber-300">
+                      Under Maintenance
+                    </span>
+                  </div>
+                  <p className="text-xs text-[#888] mt-0.5">Disabled — comics and progress are saved to this browser</p>
                 </div>
               </div>
 
               {/* Toggle switch */}
               <button
-                onClick={() => setDriveStorage(!driveStorage)}
-                className={cn(
-                  "relative w-11 h-6 rounded-full transition-colors shrink-0 focus:outline-none",
-                  driveStorage ? "bg-cyan-400" : "bg-[#333]"
-                )}
+                disabled={!isDriveStorageAvailable}
+                className="relative w-11 h-6 rounded-full bg-[#222] transition-colors shrink-0 focus:outline-none opacity-60 cursor-not-allowed"
                 aria-label="Toggle Google Drive storage"
                 role="switch"
-                aria-checked={driveStorage}
+                aria-checked={false}
+                title="Google Drive cloud storage is under maintenance"
               >
-                <span className={cn(
-                  "absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform duration-200",
-                  driveStorage ? "translate-x-5" : "translate-x-0"
-                )} />
+                <span className="absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform duration-200 translate-x-0" />
               </button>
             </div>
 
             {/* Info panel */}
-            {!driveStorage ? (
-              <div className="border-t border-[#2A2A2A] bg-[#0D0D0D] p-5">
-                <div className="flex gap-3">
-                  <Info size={16} className="text-[#555] shrink-0 mt-0.5" />
-                  <div className="text-sm text-[#888] space-y-2 leading-relaxed">
-                    <p>
-                      <span className="text-white font-semibold">Currently using: Browser local storage (IndexedDB)</span>
-                    </p>
-                    <p>
-                      PanelPass saves the entire{' '}
-                      <code className="text-cyan-400 text-xs bg-[#1a1a1a] border border-[#2A2A2A] px-1.5 py-0.5 rounded">.cbr / .cbz</code>{' '}
-                      file into your browser's built-in storage on this device. Comics load instantly and
-                      work fully offline, but they are only available on this browser.
-                    </p>
-                    <p className="text-[#666] text-xs">
-                      Clearing browser data or site storage will permanently remove all saved comics.
-                    </p>
-                  </div>
+            <div className="border-t border-[#2A2A2A] bg-[#0D0D0D] p-5">
+              <div className="flex gap-3">
+                <Info size={16} className="text-[#555] shrink-0 mt-0.5" />
+                <div className="text-sm text-[#888] space-y-2 leading-relaxed">
+                  <p>
+                    <span className="text-white font-semibold">Currently using: Browser local storage (IndexedDB)</span>
+                  </p>
+                  <p>
+                    PanelPass saves the entire{' '}
+                    <code className="text-cyan-400 text-xs bg-[#1a1a1a] border border-[#2A2A2A] px-1.5 py-0.5 rounded">.cbr / .cbz</code>{' '}
+                    file into your browser's built-in storage on this device. Files imported from
+                    Google Drive are downloaded into the browser first, then read locally.
+                  </p>
+                  <p>
+                    Reading progress and last viewed pages are also saved locally in the browser.
+                    Cloud sync for extracted pages and progress is paused while this option is under maintenance.
+                  </p>
+                  <p className="text-[#666] text-xs">
+                    Clearing browser data or site storage will permanently remove all saved comics and progress.
+                  </p>
                 </div>
               </div>
-            ) : (
-              <div className="border-t border-cyan-400/20 bg-[#0D0D0D] p-5">
-                <div className="flex gap-3">
-                  <Info size={16} className="text-cyan-400/60 shrink-0 mt-0.5" />
-                  <div className="text-sm text-[#888] space-y-2 leading-relaxed">
-                    <p>
-                      <span className="text-white font-semibold">Currently using: Google Drive cloud storage</span>
-                    </p>
-                    <p>
-                      When you import a comic, PanelPass will extract each page and upload it to your
-                      Google Drive under the following path:
-                    </p>
-                    <code className="block bg-[#1a1a1a] border border-[#2A2A2A] text-cyan-400 font-mono text-xs px-3 py-2.5 rounded">
-                      panelpass/extracted/comics/&lt;comic-title&gt;/
-                    </code>
-                    <p>
-                      Each page is stored as an individual image file inside the comic's folder. Once
-                      uploaded, the Bookshelf reads that extracted Drive library and you can open it from{' '}
-                      <span className="text-white font-semibold">any device</span> as long as you're
-                      signed in to Google — no re-importing needed.
-                    </p>
-                    <p className="text-amber-400/80 text-xs">
-                      ⚠ Requires an active Google Drive connection. Importing a comic will be slower
-                      than local storage since pages are uploaded to the cloud during the process.
-                    </p>
-                  </div>
-                </div>
-              </div>
-            )}
+            </div>
           </div>
         </section>
 
@@ -133,9 +105,9 @@ export default function Settings({ onBack }: { onBack: () => void }) {
             </div>
             {([
               ['Works offline',          '✓',       '✗'],
-              ['Cross-device access',    '✗',       '✓'],
-              ['Survives browser clear', '✗',       '✓'],
-              ['Import speed',           'Fast',    'Slower'],
+              ['Cross-device access',    '✗',       'Paused'],
+              ['Survives browser clear', '✗',       'Paused'],
+              ['Import speed',           'Fast',    'Paused'],
               ['Needs Google account',   'No',      'Yes'],
             ] as [string, string, string][]).map(([label, local, drive]) => (
               <div key={label} className="grid grid-cols-3 border-b border-[#1a1a1a] last:border-0">
@@ -146,10 +118,7 @@ export default function Settings({ onBack }: { onBack: () => void }) {
                 )}>
                   {local}
                 </div>
-                <div className={cn(
-                  "p-3 text-center border-l border-[#1a1a1a] font-mono",
-                  driveStorage ? "text-cyan-400 font-bold" : "text-[#444]"
-                )}>
+                <div className="p-3 text-center border-l border-[#1a1a1a] font-mono text-[#444]">
                   {drive}
                 </div>
               </div>

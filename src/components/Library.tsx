@@ -2,11 +2,10 @@ import { useState, useEffect, useRef, type ChangeEvent, type DragEvent, type Mou
 import { ArrowDownAZ, Clock3, Upload, Trash2, CheckCircle2, HelpCircle, Settings } from 'lucide-react';
 import GoogleDrivePicker from './GoogleDrivePicker';
 import HowToUse, { STORAGE_KEY as HOWTO_STORAGE_KEY } from './HowToUse';
-import { getComics, saveComicFile, saveComicMetadata, deleteComic, updateComicProgress, updateComicLastViewed, upsertComicsMetadata } from '../lib/db';
+import { getComics, getComicFile, saveComicFile, saveComicMetadata, deleteComic, updateComicLastViewed } from '../lib/db';
 import { ComicParser } from '../lib/parser';
 import { Comic } from '../types';
 import { generateId, cn } from '../lib/utils';
-import { createUniqueExtractedComicFolder, listExtractedComics, readLastViewedCSV, saveExtractedComicMetadata, uploadExtractedPage } from '../lib/googleDrive';
 import { useLocalStorage } from 'usehooks-ts';
 
 type ImportableFile = File & {
@@ -32,15 +31,9 @@ function sortComics(comics: Comic[], sortMode: LibrarySort): Comic[] {
 export default function Library({
   onOpenComic,
   onOpenSettings,
-  driveToken,
-  driveEnabled,
-  onDriveTokenChange,
 }: {
   onOpenComic: (id: string) => void;
   onOpenSettings: () => void;
-  driveToken: string | null;
-  driveEnabled: boolean;
-  onDriveTokenChange: (token: string | null, expiresAt: number | null) => void;
 }) {
   const [comics, setComics] = useState<Comic[]>([]);
   const [isUploading, setIsUploading] = useState(false);
@@ -50,24 +43,15 @@ export default function Library({
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const loadComics = async () => {
-    let loaded = await getComics();
+    const loaded = await getComics();
+    const locallyAvailable = await Promise.all(
+      loaded.map(async (comic) => {
+        if (comic.source.type !== 'google-drive-extracted') return true;
+        return Boolean(await getComicFile(comic.id));
+      }),
+    );
 
-    if (driveToken && driveEnabled) {
-      const driveComics = await listExtractedComics(driveToken);
-      await upsertComicsMetadata(driveComics);
-      const localById = new Map((await getComics()).map((comic) => [comic.id, comic]));
-      loaded = driveComics.map((comic) => {
-        const local = localById.get(comic.id);
-        return {
-          ...comic,
-          currentPage: local?.currentPage ?? comic.currentPage,
-          lastViewedAt: local?.lastViewedAt ?? comic.lastViewedAt,
-          isCompleted: local?.isCompleted ?? comic.isCompleted,
-        };
-      });
-    }
-
-    setComics(sortComics(loaded, librarySort));
+    setComics(sortComics(loaded.filter((_, index) => locallyAvailable[index]), librarySort));
   };
 
   useEffect(() => {
@@ -75,37 +59,11 @@ export default function Library({
     if (!localStorage.getItem(HOWTO_STORAGE_KEY)) {
       setShowHowToUse(true);
     }
-  }, [driveToken, driveEnabled]);
+  }, []);
 
   useEffect(() => {
     setComics((current) => sortComics(current, librarySort));
   }, [librarySort]);
-
-  // Restore reading progress from Drive CSV when Drive is connected
-  useEffect(() => {
-    if (!driveToken || !driveEnabled || comics.length === 0) return;
-    void (async () => {
-      try {
-        const { entries } = await readLastViewedCSV(driveToken);
-        if (entries.size === 0) return;
-        const updates: Array<{ id: string; page: number }> = [];
-        entries.forEach((page, id) => {
-          const comic = comics.find((c) => c.id === id);
-          if (comic && comic.currentPage !== page) updates.push({ id, page });
-        });
-        if (updates.length === 0) return;
-        await Promise.all(updates.map(({ id, page }) => updateComicProgress(id, page)));
-        setComics((prev) =>
-          prev.map((c) => {
-            const update = updates.find((u) => u.id === c.id);
-            return update ? { ...c, currentPage: update.page } : c;
-          }),
-        );
-      } catch (e) {
-        console.error('Failed to restore progress from Drive CSV:', e);
-      }
-    })();
-  }, [driveToken, driveEnabled, comics.length]);
 
   const importedDriveIds: Set<string> = new Set(
     comics
@@ -131,59 +89,6 @@ export default function Library({
     await processFile(file);
   };
 
-  const saveExtractedComicToDrive = async (
-    file: File,
-    parser: ComicParser,
-    totalPages: number,
-    coverImage: string,
-    driveMetadata: ImportableFile['driveMetadata'],
-  ): Promise<Comic> => {
-    if (!driveToken) {
-      throw new Error('Connect Google Drive before importing with cloud storage enabled.');
-    }
-
-    const id = generateId();
-    const title = file.name.replace(/\.(cbz|zip|cbr)$/i, '');
-    const { folderId, folderName } = await createUniqueExtractedComicFolder(driveToken, title);
-    const pageFiles = [];
-
-    for (let pageIndex = 0; pageIndex < totalPages; pageIndex++) {
-      const blob = await parser.getPageBlob(pageIndex);
-      pageFiles.push(await uploadExtractedPage(driveToken, folderId, pageIndex, blob));
-    }
-
-    const now = Date.now();
-    const metadataFileId = await saveExtractedComicMetadata(driveToken, folderId, '', {
-      id,
-      title,
-      totalPages,
-      coverImage,
-      pageFiles,
-      originalDriveFileId: driveMetadata?.id,
-      addedAt: now,
-      updatedAt: now,
-    });
-
-    return {
-      id,
-      title,
-      addedAt: now,
-      lastViewedAt: now,
-      currentPage: 0,
-      totalPages,
-      coverImage,
-      isCompleted: false,
-      source: {
-        type: 'google-drive-extracted',
-        folderId,
-        metadataFileId,
-        driveName: folderName,
-        pageFiles,
-        originalDriveFileId: driveMetadata?.id,
-      },
-    };
-  };
-
   const processFile = async (file: File) => {
     setIsUploading(true);
     setUploadError(null);
@@ -197,13 +102,6 @@ export default function Library({
       const totalPages = parser.getTotalPages();
       const coverImage = await parser.getCoverBase64();
       const driveMetadata = (file as ImportableFile).driveMetadata;
-
-      if (driveEnabled) {
-        const newComic = await saveExtractedComicToDrive(file, parser, totalPages, coverImage, driveMetadata);
-        await saveComicMetadata(newComic);
-        await loadComics();
-        return;
-      }
 
       const newComic: Comic = {
         id: generateId(),
@@ -282,8 +180,6 @@ export default function Library({
           <GoogleDrivePicker
             onImport={processFile}
             importedDriveIds={importedDriveIds}
-            onTokenChange={onDriveTokenChange}
-            driveStorageEnabled={driveEnabled}
           />
 
           <button

@@ -64,11 +64,8 @@ const STEPS: Step[] = [
         <span className="text-white font-bold">.cbr</span> files inside it.
         PanelPass will scan that folder automatically.
         <br /><br />
-        If Google Drive Cloud Storage is enabled, imported comics are extracted to{' '}
-        <code className="bg-[#1a1a1a] border border-[#333] text-cyan-400 font-mono px-2 py-0.5 rounded text-sm">
-          panelpass/extracted/comics
-        </code>{' '}
-        and the Bookshelf loads that extracted library from Drive.
+        Drive imports are downloaded into your browser storage for reading. Google Drive Cloud Storage
+        is under maintenance, so extracted pages and reading progress are not synced to Drive right now.
       </>
     ),
   },

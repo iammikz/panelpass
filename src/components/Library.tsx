@@ -1,12 +1,13 @@
-import { useState, useEffect, useRef } from 'react';
-import { Upload, Trash2, CheckCircle2, HelpCircle, Settings } from 'lucide-react';
+import { useState, useEffect, useRef, type ChangeEvent, type DragEvent, type MouseEvent } from 'react';
+import { ArrowDownAZ, Clock3, Upload, Trash2, CheckCircle2, HelpCircle, Settings } from 'lucide-react';
 import GoogleDrivePicker from './GoogleDrivePicker';
 import HowToUse, { STORAGE_KEY as HOWTO_STORAGE_KEY } from './HowToUse';
-import { getComics, saveComicFile, saveComicMetadata, deleteComic, updateComicProgress } from '../lib/db';
+import { getComics, saveComicFile, saveComicMetadata, deleteComic, updateComicProgress, updateComicLastViewed, upsertComicsMetadata } from '../lib/db';
 import { ComicParser } from '../lib/parser';
 import { Comic } from '../types';
 import { generateId, cn } from '../lib/utils';
-import { readLastViewedCSV } from '../lib/googleDrive';
+import { createUniqueExtractedComicFolder, listExtractedComics, readLastViewedCSV, saveExtractedComicMetadata, uploadExtractedPage } from '../lib/googleDrive';
+import { useLocalStorage } from 'usehooks-ts';
 
 type ImportableFile = File & {
   driveMetadata?: {
@@ -14,6 +15,19 @@ type ImportableFile = File & {
     name: string;
   };
 };
+
+type LibrarySort = 'title' | 'lastViewed';
+const LIBRARY_SORT_KEY = 'panelpass-library-sort';
+
+function sortComics(comics: Comic[], sortMode: LibrarySort): Comic[] {
+  return [...comics].sort((a, b) => {
+    if (sortMode === 'lastViewed') {
+      return (b.lastViewedAt ?? b.addedAt) - (a.lastViewedAt ?? a.addedAt);
+    }
+
+    return a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: 'base' });
+  });
+}
 
 export default function Library({
   onOpenComic,
@@ -32,14 +46,40 @@ export default function Library({
   const [isUploading, setIsUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [showHowToUse, setShowHowToUse] = useState(false);
+  const [librarySort, setLibrarySort] = useLocalStorage<LibrarySort>(LIBRARY_SORT_KEY, 'title');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const loadComics = async () => {
+    let loaded = await getComics();
+
+    if (driveToken && driveEnabled) {
+      const driveComics = await listExtractedComics(driveToken);
+      await upsertComicsMetadata(driveComics);
+      const localById = new Map((await getComics()).map((comic) => [comic.id, comic]));
+      loaded = driveComics.map((comic) => {
+        const local = localById.get(comic.id);
+        return {
+          ...comic,
+          currentPage: local?.currentPage ?? comic.currentPage,
+          lastViewedAt: local?.lastViewedAt ?? comic.lastViewedAt,
+          isCompleted: local?.isCompleted ?? comic.isCompleted,
+        };
+      });
+    }
+
+    setComics(sortComics(loaded, librarySort));
+  };
+
   useEffect(() => {
-    loadComics();
+    void loadComics();
     if (!localStorage.getItem(HOWTO_STORAGE_KEY)) {
       setShowHowToUse(true);
     }
-  }, []);
+  }, [driveToken, driveEnabled]);
+
+  useEffect(() => {
+    setComics((current) => sortComics(current, librarySort));
+  }, [librarySort]);
 
   // Restore reading progress from Drive CSV when Drive is connected
   useEffect(() => {
@@ -67,29 +107,81 @@ export default function Library({
     })();
   }, [driveToken, driveEnabled, comics.length]);
 
-  const loadComics = async () => {
-    const loaded = await getComics();
-    setComics(loaded.sort((a, b) => b.addedAt - a.addedAt));
-  };
-
-  const importedDriveIds = new Set(
+  const importedDriveIds: Set<string> = new Set(
     comics
-      .filter((comic) => comic.source.type === 'google-drive')
-      .map((comic) => comic.source.driveFileId),
+      .map((comic) => {
+        if (comic.source.type === 'google-drive') return comic.source.driveFileId;
+        if (comic.source.type === 'google-drive-extracted') return comic.source.originalDriveFileId;
+        return undefined;
+      })
+      .filter((id): id is string => Boolean(id)),
   );
 
-  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileChange = async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     await processFile(file);
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
-  const handleDrop = async (e: React.DragEvent) => {
+  const handleDrop = async (e: DragEvent) => {
     e.preventDefault();
     const file = e.dataTransfer.files?.[0];
     if (!file) return;
     await processFile(file);
+  };
+
+  const saveExtractedComicToDrive = async (
+    file: File,
+    parser: ComicParser,
+    totalPages: number,
+    coverImage: string,
+    driveMetadata: ImportableFile['driveMetadata'],
+  ): Promise<Comic> => {
+    if (!driveToken) {
+      throw new Error('Connect Google Drive before importing with cloud storage enabled.');
+    }
+
+    const id = generateId();
+    const title = file.name.replace(/\.(cbz|zip|cbr)$/i, '');
+    const { folderId, folderName } = await createUniqueExtractedComicFolder(driveToken, title);
+    const pageFiles = [];
+
+    for (let pageIndex = 0; pageIndex < totalPages; pageIndex++) {
+      const blob = await parser.getPageBlob(pageIndex);
+      pageFiles.push(await uploadExtractedPage(driveToken, folderId, pageIndex, blob));
+    }
+
+    const now = Date.now();
+    const metadataFileId = await saveExtractedComicMetadata(driveToken, folderId, '', {
+      id,
+      title,
+      totalPages,
+      coverImage,
+      pageFiles,
+      originalDriveFileId: driveMetadata?.id,
+      addedAt: now,
+      updatedAt: now,
+    });
+
+    return {
+      id,
+      title,
+      addedAt: now,
+      lastViewedAt: now,
+      currentPage: 0,
+      totalPages,
+      coverImage,
+      isCompleted: false,
+      source: {
+        type: 'google-drive-extracted',
+        folderId,
+        metadataFileId,
+        driveName: folderName,
+        pageFiles,
+        originalDriveFileId: driveMetadata?.id,
+      },
+    };
   };
 
   const processFile = async (file: File) => {
@@ -106,10 +198,18 @@ export default function Library({
       const coverImage = await parser.getCoverBase64();
       const driveMetadata = (file as ImportableFile).driveMetadata;
 
+      if (driveEnabled) {
+        const newComic = await saveExtractedComicToDrive(file, parser, totalPages, coverImage, driveMetadata);
+        await saveComicMetadata(newComic);
+        await loadComics();
+        return;
+      }
+
       const newComic: Comic = {
         id: generateId(),
         title: file.name.replace(/\.(cbz|zip|cbr)$/i, ''),
         addedAt: Date.now(),
+        lastViewedAt: Date.now(),
         currentPage: 0,
         totalPages,
         coverImage,
@@ -134,12 +234,22 @@ export default function Library({
     }
   };
 
-  const handleDelete = async (e: React.MouseEvent, id: string) => {
+  const handleDelete = async (e: MouseEvent, id: string) => {
     e.stopPropagation();
     if (confirm('Are you sure you want to delete this comic?')) {
       await deleteComic(id);
       await loadComics();
     }
+  };
+
+  const handleOpenComic = (id: string) => {
+    const now = Date.now();
+    setComics((current) => sortComics(
+      current.map((comic) => comic.id === id ? { ...comic, lastViewedAt: now } : comic),
+      librarySort,
+    ));
+    updateComicLastViewed(id).catch(console.error);
+    onOpenComic(id);
   };
 
   return (
@@ -169,7 +279,12 @@ export default function Library({
             </div>
           </button>
 
-          <GoogleDrivePicker onImport={processFile} importedDriveIds={importedDriveIds} onTokenChange={onDriveTokenChange} />
+          <GoogleDrivePicker
+            onImport={processFile}
+            importedDriveIds={importedDriveIds}
+            onTokenChange={onDriveTokenChange}
+            driveStorageEnabled={driveEnabled}
+          />
 
           <button
             onClick={() => setShowHowToUse(true)}
@@ -198,7 +313,33 @@ export default function Library({
 
         <div className="flex justify-between items-center mb-6">
           <h3 className="text-xl font-bold uppercase tracking-tight italic font-display">Your Bookshelf</h3>
-          <span className="text-xs border border-[#333] px-3 py-1 rounded text-[#888] font-bold uppercase tracking-widest">{comics.length} {comics.length === 1 ? 'Book' : 'Books'}</span>
+          <div className="flex items-center gap-3">
+            <div className="flex rounded border border-[#333] overflow-hidden">
+              <button
+                onClick={() => setLibrarySort('title')}
+                className={cn(
+                  'px-3 py-1.5 text-xs font-bold uppercase tracking-widest transition-colors flex items-center gap-2',
+                  librarySort === 'title' ? 'bg-cyan-400 text-black' : 'text-[#888] hover:text-cyan-400',
+                )}
+                title="Sort by comic name"
+              >
+                <ArrowDownAZ size={14} />
+                Name
+              </button>
+              <button
+                onClick={() => setLibrarySort('lastViewed')}
+                className={cn(
+                  'px-3 py-1.5 text-xs font-bold uppercase tracking-widest transition-colors flex items-center gap-2 border-l border-[#333]',
+                  librarySort === 'lastViewed' ? 'bg-cyan-400 text-black' : 'text-[#888] hover:text-cyan-400',
+                )}
+                title="Sort by last viewed"
+              >
+                <Clock3 size={14} />
+                Recent
+              </button>
+            </div>
+            <span className="text-xs border border-[#333] px-3 py-1 rounded text-[#888] font-bold uppercase tracking-widest">{comics.length} {comics.length === 1 ? 'Book' : 'Books'}</span>
+          </div>
         </div>
 
         {comics.length === 0 && !isUploading ? (
@@ -220,7 +361,7 @@ export default function Library({
               return (
                 <div 
                   key={comic.id} 
-                  onClick={() => onOpenComic(comic.id)}
+                  onClick={() => handleOpenComic(comic.id)}
                   className="flex flex-col gap-2 group cursor-pointer"
                 >
                   <div className="aspect-[2/3] bg-[#222] border-2 border-[#333] group-hover:border-cyan-400 overflow-hidden relative shadow-lg">

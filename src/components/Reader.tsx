@@ -5,7 +5,7 @@ import { ComicParser } from '../lib/parser';
 import { Comic, Theme } from '../types';
 import { cn } from '../lib/utils';
 import { useLocalStorage } from 'usehooks-ts';
-import { readLastViewedCSV, writeLastViewedCSV } from '../lib/googleDrive';
+import { downloadDriveFile, readLastViewedCSV, writeLastViewedCSV } from '../lib/googleDrive';
 
 export default function Reader({
   comicId,
@@ -54,6 +54,8 @@ export default function Reader({
   const pageCounterInputRef = useRef<HTMLInputElement>(null);
   const saveProgressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const driveWriteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const allPagesRestoreFrameRef = useRef<number | null>(null);
+  const initialAllPagesRestoreRef = useRef(false);
   const driveTokenRef = useRef<string | null>(driveToken ?? null);
   const driveEnabledRef = useRef<boolean>(driveEnabled ?? false);
   driveTokenRef.current = driveToken ?? null;
@@ -108,6 +110,7 @@ export default function Reader({
       if (doubleTapTimerRef.current) clearTimeout(doubleTapTimerRef.current);
       if (saveProgressTimerRef.current) clearTimeout(saveProgressTimerRef.current);
       if (driveWriteTimerRef.current) clearTimeout(driveWriteTimerRef.current);
+      if (allPagesRestoreFrameRef.current) cancelAnimationFrame(allPagesRestoreFrameRef.current);
       if (pageUrlRef.current) URL.revokeObjectURL(pageUrlRef.current);
       if (pageUrl2Ref.current) URL.revokeObjectURL(pageUrl2Ref.current);
       if (nextPageUrlRef.current) URL.revokeObjectURL(nextPageUrlRef.current);
@@ -117,14 +120,18 @@ export default function Reader({
 
   // Load/unload all page blobs when switching in/out of webtoon-all mode
   useEffect(() => {
-    if (isAllPages && parser) {
+    const c = comicRef.current;
+    const canLoadExtracted = c?.source.type === 'google-drive-extracted' && Boolean(driveTokenRef.current);
+    if (isAllPages && (parser || canLoadExtracted)) {
+      initialAllPagesRestoreRef.current = true;
       void loadAllPages(parser);
     } else {
+      initialAllPagesRestoreRef.current = false;
       allPageUrlsRef.current.forEach((u) => URL.revokeObjectURL(u));
       allPageUrlsRef.current = [];
       setAllPageUrls([]);
     }
-  }, [isAllPages, parser]);
+  }, [isAllPages, parser, comic?.source.type]);
 
   // Track visible page in all-pages mode via IntersectionObserver
   useEffect(() => {
@@ -154,6 +161,7 @@ export default function Reader({
   // Save progress when visible page changes in all-pages scroll mode
   useEffect(() => {
     if (!isAllPages) return;
+    if (initialAllPagesRestoreRef.current) return;
     const c = comicRef.current;
     if (!c) return;
     // Keep comic state in sync so header/scrubber reflects scroll position
@@ -166,20 +174,64 @@ export default function Reader({
     scheduleDriveWrite(c.id, visiblePage);
   }, [visiblePage, isAllPages]);
 
+  // Restore the saved page once all page elements exist in webtoon all-pages mode.
+  useEffect(() => {
+    if (!isAllPages || isLoadingAll || allPageUrls.length === 0) return;
+    const c = comicRef.current;
+    if (!c) return;
+    const targetPage = Math.max(0, Math.min(c.currentPage, c.totalPages - 1));
+
+    if (allPagesRestoreFrameRef.current) cancelAnimationFrame(allPagesRestoreFrameRef.current);
+    allPagesRestoreFrameRef.current = requestAnimationFrame(() => {
+      allPagesRestoreFrameRef.current = requestAnimationFrame(() => {
+        const el = pageImgRefs.current[targetPage];
+        if (el) {
+          el.scrollIntoView({
+            behavior: 'auto',
+            block: webtoonSubMode === 'all-h' ? 'nearest' : 'start',
+            inline: webtoonSubMode === 'all-h' ? 'start' : 'nearest',
+          });
+        }
+
+        setVisiblePage(targetPage);
+        setComic((prev) => prev ? { ...prev, currentPage: targetPage } : null);
+        allPagesRestoreFrameRef.current = requestAnimationFrame(() => {
+          initialAllPagesRestoreRef.current = false;
+        });
+      });
+    });
+  }, [isAllPages, isLoadingAll, allPageUrls, webtoonSubMode]);
+
   // Re-display current page when sub-mode changes (e.g. single↔dual, webtoon-all→single)
   useEffect(() => {
     const p = parserRef.current;
     const c = comicRef.current;
     const inAllPages = readerModeRef.current === 'webtoon' && webtoonSubMode !== 'single';
-    if (p && c && !inAllPages) void displayPage(p, c.currentPage);
-  }, [pageSubMode, readerMode, webtoonSubMode]);
+    const canDisplayExtracted = c?.source.type === 'google-drive-extracted' && Boolean(driveTokenRef.current);
+    if (c && !inAllPages && (p || canDisplayExtracted)) void displayPage(p, c.currentPage);
+  }, [pageSubMode, readerMode, webtoonSubMode, comic?.source.type]);
 
-  const loadAllPages = async (p: ComicParser) => {
+  const getPageBlobUrlForIndex = async (p: ComicParser | null, index: number) => {
+    const c = comicRef.current;
+    if (c?.source.type === 'google-drive-extracted') {
+      const token = driveTokenRef.current;
+      if (!token) throw new Error('Connect Google Drive to read this cloud-stored comic.');
+      const pageFile = c.source.pageFiles[index];
+      if (!pageFile) throw new Error('Page file not found in Google Drive metadata.');
+      return URL.createObjectURL(await downloadDriveFile(token, pageFile.id));
+    }
+
+    if (!p) throw new Error('Comic parser is not ready.');
+    return p.getPageBlobUrl(index);
+  };
+
+  const loadAllPages = async (p: ComicParser | null) => {
     setIsLoadingAll(true);
     try {
       const urls: string[] = [];
-      for (let i = 0; i < p.getTotalPages(); i++) {
-        urls.push(await p.getPageBlobUrl(i));
+      const totalPages = comicRef.current?.totalPages ?? p?.getTotalPages() ?? 0;
+      for (let i = 0; i < totalPages; i++) {
+        urls.push(await getPageBlobUrlForIndex(p, i));
       }
       allPageUrlsRef.current.forEach((u) => URL.revokeObjectURL(u));
       allPageUrlsRef.current = urls;
@@ -199,6 +251,16 @@ export default function Reader({
       if (!meta) throw new Error("Comic metadata not found");
       
       setComic(meta);
+
+      if (meta.source.type === 'google-drive-extracted') {
+        if (!driveTokenRef.current) throw new Error('Connect Google Drive to read this cloud-stored comic.');
+        setParser(null);
+        await displayPage(null, meta.currentPage);
+        setIsLoading(false);
+        hideUITimerRef.current = setTimeout(() => setShowUI(false), 2000);
+        return;
+      }
+
       const fileBlob = await getComicFile(comicId);
       if (!fileBlob) throw new Error("Comic file not found on device");
 
@@ -218,9 +280,9 @@ export default function Reader({
     }
   };
 
-  const displayPage = async (p: ComicParser, index: number) => {
+  const displayPage = async (p: ComicParser | null, index: number) => {
     try {
-      const url = await p.getPageBlobUrl(index);
+      const url = await getPageBlobUrlForIndex(p, index);
       setPageUrl(prev => {
         if (prev) URL.revokeObjectURL(prev);
         pageUrlRef.current = url;
@@ -230,8 +292,9 @@ export default function Reader({
 
       // Second page for dual mode (reads refs so always fresh even in stale closures)
       const showDual = readerModeRef.current === 'single' && pageSubModeRef.current === 'dual';
-      if (showDual && index + 1 < p.getTotalPages()) {
-        const url2 = await p.getPageBlobUrl(index + 1);
+      const totalPages = comicRef.current?.totalPages ?? p?.getTotalPages() ?? 0;
+      if (showDual && index + 1 < totalPages) {
+        const url2 = await getPageBlobUrlForIndex(p, index + 1);
         setPageUrl2(prev => {
           if (prev) URL.revokeObjectURL(prev);
           pageUrl2Ref.current = url2;
@@ -245,8 +308,8 @@ export default function Reader({
 
       // Preload (skip ahead by 2 in dual mode)
       const preloadIdx = index + (showDual ? 2 : 1);
-      if (preloadIdx < p.getTotalPages()) {
-        const nextUrl = await p.getPageBlobUrl(preloadIdx);
+      if (preloadIdx < totalPages) {
+        const nextUrl = await getPageBlobUrlForIndex(p, preloadIdx);
         setNextPageUrl(prev => {
           if (prev) URL.revokeObjectURL(prev);
           nextPageUrlRef.current = nextUrl;
@@ -264,7 +327,8 @@ export default function Reader({
 
   const handleTurnPage = useCallback(async (direction: number) => {
     const current = comicRef.current;
-    if (!current || !parser) return;
+    if (!current) return;
+    if (current.source.type !== 'google-drive-extracted' && !parser) return;
 
     // In dual mode each turn advances by 2 pages
     const step = readerModeRef.current === 'single' && pageSubModeRef.current === 'dual' ? 2 : 1;
@@ -418,7 +482,7 @@ export default function Reader({
       setComic(prev => prev ? { ...prev, currentPage: idx } : null);
       updateComicProgress(c.id, idx).catch(console.error);
       scheduleDriveWrite(c.id, idx);
-      void displayPage(parserRef.current!, idx);
+      void displayPage(parserRef.current, idx);
     }
   }, [isAllPages, webtoonSubMode]);
 

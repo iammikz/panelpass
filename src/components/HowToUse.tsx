@@ -1,14 +1,14 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, type ReactNode } from 'react';
 import { Upload, Cloud, ChevronLeft, ChevronRight, X, BookOpen, ScrollText, Zap } from 'lucide-react';
 import { cn } from '../lib/utils';
 
 export const STORAGE_KEY = 'panelpass_howto_seen';
 
 interface Step {
-  icon: React.ReactNode;
+  icon: ReactNode;
   eyebrow: string;
   title: string;
-  body: React.ReactNode;
+  body: ReactNode;
 }
 
 const STEPS: Step[] = [
@@ -63,6 +63,12 @@ const STEPS: Step[] = [
         <span className="text-white font-bold">.cbz</span> or{' '}
         <span className="text-white font-bold">.cbr</span> files inside it.
         PanelPass will scan that folder automatically.
+        <br /><br />
+        If Google Drive Cloud Storage is enabled, imported comics are extracted to{' '}
+        <code className="bg-[#1a1a1a] border border-[#333] text-cyan-400 font-mono px-2 py-0.5 rounded text-sm">
+          panelpass/extracted/comics
+        </code>{' '}
+        and the Bookshelf loads that extracted library from Drive.
       </>
     ),
   },

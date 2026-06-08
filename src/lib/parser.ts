@@ -97,12 +97,13 @@ export class ComicParser {
     return this.rarBlobs ? this.rarBlobs.length : this.imagePaths.length;
   }
 
-  async getPageBlobUrl(pageIndex: number): Promise<string> {
+  async getPageBlob(pageIndex: number): Promise<Blob> {
     if (this.rarBlobs) {
       const blob = this.rarBlobs[pageIndex];
       if (!blob) throw new Error('Invalid page index');
-      return URL.createObjectURL(blob);
+      return blob;
     }
+
     if (!this.zip || !this.imagePaths[pageIndex]) {
       throw new Error('Invalid page index or zip not loaded');
     }
@@ -110,7 +111,11 @@ export class ComicParser {
     const file = this.zip.file(path);
     if (!file) throw new Error('File not found inside archive');
     const blob = await file.async('blob');
-    return URL.createObjectURL(blob);
+    return new Blob([blob], { type: mimeForFilename(path) });
+  }
+
+  async getPageBlobUrl(pageIndex: number): Promise<string> {
+    return URL.createObjectURL(await this.getPageBlob(pageIndex));
   }
 
   async getCoverBase64(): Promise<string> {

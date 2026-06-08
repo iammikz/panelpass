@@ -19,16 +19,17 @@ export async function getComics(): Promise<Comic[]> {
 
   let hasLegacyComics = false;
   const normalizedComics = comics.map((comic) => {
-    if (comic.source) {
-      return comic;
+    const normalizedComic = {
+      ...comic,
+      lastViewedAt: comic.lastViewedAt ?? comic.addedAt,
+      source: comic.source ?? ({ type: 'local' } satisfies ComicSource),
+    };
+
+    if (!comic.source || comic.lastViewedAt === undefined) {
+      hasLegacyComics = true;
     }
 
-    hasLegacyComics = true;
-
-    return {
-      ...comic,
-      source: { type: 'local' } satisfies ComicSource,
-    };
+    return normalizedComic;
   });
 
   if (hasLegacyComics) {
@@ -44,7 +45,10 @@ export async function saveComicFile(id: string, file: Blob) {
 
 export async function saveComicMetadata(comic: Comic) {
   const comics = await getComics();
-  comics.push(comic);
+  comics.push({
+    ...comic,
+    lastViewedAt: comic.lastViewedAt ?? comic.addedAt,
+  });
   await metadataStorage.setItem('comics', comics);
 }
 
@@ -57,11 +61,41 @@ export async function updateComicProgress(id: string, currentPage: number) {
   const index = comics.findIndex((c) => c.id === id);
   if (index !== -1) {
     comics[index].currentPage = currentPage;
+    comics[index].lastViewedAt = Date.now();
     if (currentPage >= comics[index].totalPages - 1) {
       comics[index].isCompleted = true;
+    } else {
+      comics[index].isCompleted = false;
     }
     await metadataStorage.setItem('comics', comics);
   }
+}
+
+export async function updateComicLastViewed(id: string) {
+  const comics = await getComics();
+  const index = comics.findIndex((c) => c.id === id);
+  if (index !== -1) {
+    comics[index].lastViewedAt = Date.now();
+    await metadataStorage.setItem('comics', comics);
+  }
+}
+
+export async function upsertComicsMetadata(nextComics: Comic[]) {
+  const comics = await getComics();
+  const byId = new Map(comics.map((comic) => [comic.id, comic]));
+
+  nextComics.forEach((comic) => {
+    const existing = byId.get(comic.id);
+    byId.set(comic.id, {
+      ...existing,
+      ...comic,
+      currentPage: existing?.currentPage ?? comic.currentPage,
+      lastViewedAt: existing?.lastViewedAt ?? comic.lastViewedAt ?? comic.addedAt,
+      isCompleted: existing?.isCompleted ?? comic.isCompleted,
+    });
+  });
+
+  await metadataStorage.setItem('comics', [...byId.values()]);
 }
 
 export async function deleteComic(id: string) {

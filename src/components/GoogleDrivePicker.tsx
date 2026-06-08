@@ -8,6 +8,7 @@ interface GoogleDrivePickerProps {
   onImport: (file: File) => Promise<void>;
   importedDriveIds: Set<string>;
   onTokenChange: (token: string | null, expiresAt: number | null) => void;
+  driveStorageEnabled: boolean;
 }
 
 type ImportableDriveFile = File & {
@@ -29,7 +30,7 @@ function formatBytes(value: number): string {
   return `${size >= 10 || index === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[index]}`;
 }
 
-export default function GoogleDrivePicker({ onImport, importedDriveIds, onTokenChange }: GoogleDrivePickerProps) {
+export default function GoogleDrivePicker({ onImport, importedDriveIds, onTokenChange, driveStorageEnabled }: GoogleDrivePickerProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [accessToken, setAccessToken] = useState<string | null>(null);
   const [expiresAt, setExpiresAt] = useState<number | null>(null);
@@ -287,7 +288,9 @@ export default function GoogleDrivePicker({ onImport, importedDriveIds, onTokenC
 
             <div className="border-b border-[#222] px-6 py-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between bg-[#111]">
               <p className="text-xs text-[#888] max-w-2xl">
-                Browse .cbz and .cbr files from your Google Drive panelpass folder and import them into local storage.
+                {driveStorageEnabled
+                  ? 'Browse .cbz and .cbr files from your Google Drive panelpass folder, extract them, and save the page library under panelpass/extracted/comics/.'
+                  : 'Browse .cbz and .cbr files from your Google Drive panelpass folder and import them into local browser storage.'}
               </p>
 
               <button

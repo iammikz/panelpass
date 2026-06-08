@@ -41,7 +41,7 @@ export default function Settings({ onBack }: { onBack: () => void }) {
                   <p className="font-bold text-sm">Google Drive Cloud Storage</p>
                   <p className="text-xs text-[#888] mt-0.5">
                     {driveStorage
-                      ? 'Active — pages saved to your Drive'
+                      ? 'Active — extracted pages saved to your Drive'
                       : 'Off — comics saved to this device'}
                   </p>
                 </div>
@@ -103,7 +103,7 @@ export default function Settings({ onBack }: { onBack: () => void }) {
                     </code>
                     <p>
                       Each page is stored as an individual image file inside the comic's folder. Once
-                      uploaded, you can open and read your library from{' '}
+                      uploaded, the Bookshelf reads that extracted Drive library and you can open it from{' '}
                       <span className="text-white font-semibold">any device</span> as long as you're
                       signed in to Google — no re-importing needed.
                     </p>

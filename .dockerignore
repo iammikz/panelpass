@@ -1,0 +1,9 @@
+# Keep the Docker build context small and the image clean
+node_modules
+dist
+docs
+extensions
+.git
+.gitmodules
+*.log
+.DS_Store

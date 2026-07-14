@@ -141,3 +141,10 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# Project docs (design notes, not source)
+/docs/
+
+#extensions (repo plugins)
+/extensions/
+/extensions/keiyoushi-extensions-source

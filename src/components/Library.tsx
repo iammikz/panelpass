@@ -1,11 +1,11 @@
 import { useState, useEffect, useRef, type ChangeEvent, type DragEvent, type MouseEvent } from 'react';
-import { ArrowDownAZ, Clock3, Upload, Trash2, CheckCircle2, HelpCircle, Settings } from 'lucide-react';
+import { ArrowDownAZ, Clock3, Upload, Trash2, CheckCircle2, HelpCircle, Settings, AlignJustify, LayoutPanelLeft } from 'lucide-react';
 import GoogleDrivePicker from './GoogleDrivePicker';
 import HowToUse, { STORAGE_KEY as HOWTO_STORAGE_KEY } from './HowToUse';
 import { getComics, getComicFile, saveComicFile, saveComicMetadata, deleteComic, updateComicLastViewed } from '../lib/db';
 import { ComicParser } from '../lib/parser';
 import { Comic } from '../types';
-import { generateId, cn } from '../lib/utils';
+import { generateId, cn, inferSeries } from '../lib/utils';
 import { useLocalStorage } from 'usehooks-ts';
 
 type ImportableFile = File & {
@@ -18,6 +18,9 @@ type ImportableFile = File & {
 type LibrarySort = 'title' | 'lastViewed';
 const LIBRARY_SORT_KEY = 'panelpass-library-sort';
 
+type LibraryFilter = 'all' | 'inProgress' | 'completed' | 'recent';
+const RECENT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
 function sortComics(comics: Comic[], sortMode: LibrarySort): Comic[] {
   return [...comics].sort((a, b) => {
     if (sortMode === 'lastViewed') {
@@ -26,6 +29,14 @@ function sortComics(comics: Comic[], sortMode: LibrarySort): Comic[] {
 
     return a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: 'base' });
   });
+}
+
+function matchesFilter(comic: Comic, filter: LibraryFilter): boolean {
+  if (filter === 'all') return true;
+  if (filter === 'completed') return comic.isCompleted;
+  if (filter === 'inProgress') return !comic.isCompleted && comic.currentPage > 0;
+  if (filter === 'recent') return (comic.addedAt ?? 0) >= Date.now() - RECENT_WINDOW_MS;
+  return true;
 }
 
 export default function Library({
@@ -40,6 +51,10 @@ export default function Library({
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [showHowToUse, setShowHowToUse] = useState(false);
   const [librarySort, setLibrarySort] = useLocalStorage<LibrarySort>(LIBRARY_SORT_KEY, 'title');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [libraryFilter, setLibraryFilter] = useState<LibraryFilter>('all');
+  const [groupBy, setGroupBy] = useState<'none' | 'series'>('none');
+  const [collapsedSeries, setCollapsedSeries] = useState<Set<string>>(new Set());
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const loadComics = async () => {
@@ -53,6 +68,27 @@ export default function Library({
 
     setComics(sortComics(loaded.filter((_, index) => locallyAvailable[index]), librarySort));
   };
+
+  const filteredComics = comics.filter(
+    (comic) =>
+      matchesFilter(comic, libraryFilter) &&
+      (searchQuery.trim() === '' ||
+        comic.title.toLowerCase().includes(searchQuery.trim().toLowerCase())),
+  );
+
+  // Group filtered comics by series (auto-inferred when no explicit `series`).
+  const seriesGroups: { name: string; comics: Comic[] }[] = (() => {
+    if (groupBy !== 'series') return [];
+    const map = new Map<string, Comic[]>();
+    for (const comic of filteredComics) {
+      const key = (comic.series ?? inferSeries(comic.title)).trim() || 'Unsorted';
+      if (!map.has(key)) map.set(key, []);
+      map.get(key)!.push(comic);
+    }
+    return [...map.entries()]
+      .map(([name, cs]) => ({ name, comics: sortComics(cs, librarySort) }))
+      .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+  })();
 
   useEffect(() => {
     void loadComics();
@@ -207,9 +243,34 @@ export default function Library({
           </div>
         )}
 
-        <div className="flex justify-between items-center mb-6">
-          <h3 className="text-xl font-bold uppercase tracking-tight italic font-display">Your Bookshelf</h3>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 flex-wrap">
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search titles…"
+              className="bg-[#161616] border border-[#333] rounded px-3 py-1.5 text-xs text-[#CCC] placeholder:text-[#666] focus:border-cyan-400 focus:outline-none w-40 sm:w-52"
+            />
+            <div className="flex rounded border border-[#333] overflow-hidden">
+              {(['all', 'inProgress', 'completed', 'recent'] as LibraryFilter[]).map((f) => (
+                <button
+                  key={f}
+                  onClick={() => setLibraryFilter(f)}
+                  className={cn(
+                    'px-3 py-1.5 text-xs font-bold uppercase tracking-widest transition-colors border-l border-[#333] first:border-l-0',
+                    libraryFilter === f ? 'bg-cyan-400 text-black' : 'text-[#888] hover:text-cyan-400',
+                  )}
+                  title={
+                    f === 'all' ? 'All comics'
+                    : f === 'inProgress' ? 'Started but not finished'
+                    : f === 'completed' ? 'Finished comics'
+                    : 'Added in the last 7 days'
+                  }
+                >
+                  {f === 'all' ? 'All' : f === 'inProgress' ? 'Reading' : f === 'completed' ? 'Done' : 'New'}
+                </button>
+              ))}
+            </div>
             <div className="flex rounded border border-[#333] overflow-hidden">
               <button
                 onClick={() => setLibrarySort('title')}
@@ -234,9 +295,32 @@ export default function Library({
                 Recent
               </button>
             </div>
-            <span className="text-xs border border-[#333] px-3 py-1 rounded text-[#888] font-bold uppercase tracking-widest">{comics.length} {comics.length === 1 ? 'Book' : 'Books'}</span>
+            <div className="flex rounded border border-[#333] overflow-hidden">
+              <button
+                onClick={() => setGroupBy('none')}
+                className={cn(
+                  'px-3 py-1.5 text-xs font-bold uppercase tracking-widest transition-colors flex items-center gap-2',
+                  groupBy === 'none' ? 'bg-cyan-400 text-black' : 'text-[#888] hover:text-cyan-400',
+                )}
+                title="Ungrouped view"
+              >
+                <AlignJustify size={14} />
+                Ungrouped
+              </button>
+              <button
+                onClick={() => setGroupBy('series')}
+                className={cn(
+                  'px-3 py-1.5 text-xs font-bold uppercase tracking-widest transition-colors flex items-center gap-2 border-l border-[#333]',
+                  groupBy === 'series' ? 'bg-cyan-400 text-black' : 'text-[#888] hover:text-cyan-400',
+                )}
+                title="Group by series"
+              >
+                <LayoutPanelLeft size={14} />
+                By Series
+              </button>
+            </div>
+            <span className="text-xs border border-[#333] px-3 py-1 rounded text-[#888] font-bold uppercase tracking-widest">{groupBy === 'series' ? seriesGroups.length : filteredComics.length} {groupBy === 'series' ? (seriesGroups.length === 1 ? 'Series' : 'Series') : filteredComics.length === 1 ? 'Book' : 'Books'}</span>
           </div>
-        </div>
 
         {comics.length === 0 && !isUploading ? (
           <div 
@@ -250,67 +334,139 @@ export default function Library({
               Drag and drop a `.cbz`, `.zip`, or `.cbr` comic file here, or use the upload and Google Drive buttons in the header.
             </p>
           </div>
+        ) : filteredComics.length === 0 ? (
+          <div className="flex flex-col items-center justify-center p-16 text-center my-auto">
+            <div className="text-5xl mb-4 text-[#444]">🔍</div>
+            <h3 className="text-sm font-bold uppercase tracking-widest mb-2 text-[#888]">No matching comics</h3>
+            <p className="text-[#555] text-xs max-w-sm">
+              No titles match "{searchQuery.trim()}"{libraryFilter !== 'all' ? ` in the "${libraryFilter === 'inProgress' ? 'Reading' : libraryFilter === 'completed' ? 'Done' : 'New'}" filter` : ''}. Try a different search or filter.
+            </p>
+            <button
+              onClick={() => { setSearchQuery(''); setLibraryFilter('all'); }}
+              className="mt-4 border border-[#333] px-4 py-2 text-xs font-bold uppercase tracking-widest text-[#888] hover:border-cyan-400 hover:text-cyan-400 transition-colors"
+            >
+              Clear filters
+            </button>
+          </div>
         ) : (
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-6 flex-1 content-start">
-            {comics.map(comic => {
-              const progress = comic.totalPages > 1 ? (comic.currentPage / (comic.totalPages - 1)) * 100 : 100;
-              return (
-                <div 
-                  key={comic.id} 
-                  onClick={() => handleOpenComic(comic.id)}
-                  className="flex flex-col gap-2 group cursor-pointer"
-                >
-                  <div className="aspect-[2/3] bg-[#222] border-2 border-[#333] group-hover:border-cyan-400 overflow-hidden relative shadow-lg">
-                    <div className="absolute inset-0 bg-gradient-to-tr from-cyan-400/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity z-10 pointer-events-none"></div>
-                    
-                    {comic.coverImage ? (
-                      <img src={comic.coverImage} alt={comic.title} className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105" />
-                    ) : (
-                      <div className="w-full h-full flex flex-col items-center justify-center p-2">
-                        <div className="bg-black/80 p-2 text-[10px] font-bold uppercase mt-auto text-cyan-400">Page 1</div>
-                      </div>
-                    )}
-                    
-                    {comic.isCompleted ? (
-                      <div className="absolute top-2 right-2 z-20 w-4 h-4 rounded-full bg-cyan-400 flex items-center justify-center text-black">
-                        <CheckCircle2 size={12} strokeWidth={3} />
-                      </div>
-                    ) : (
-                      <div className="absolute top-2 right-2 z-20 w-4 h-4 rounded-full bg-cyan-400/50 group-hover:bg-cyan-400 transition-colors"></div>
-                    )}
-
-                    <button 
-                      onClick={(e) => handleDelete(e, comic.id)}
-                      className="absolute top-2 left-2 z-20 bg-black/80 text-red-500 rounded p-2.5 sm:p-1.5 hover:bg-black hover:text-red-400 border border-red-500/50 hover:border-red-400 transition-all"
-                      title="Delete comic"
-                    >
-                      <Trash2 size={16} className="sm:w-3.5 sm:h-3.5" />
-                    </button>
-
-                    <div className="absolute bottom-0 left-0 right-0 z-20 flex flex-col h-full justify-between pointer-events-none">
-                       <div className="mt-auto">
-                          <div className="bg-black/90 p-2 text-[10px] font-bold uppercase tracking-tighter w-full border-t border-[#333] flex justify-between">
-                            <span>Pg {comic.currentPage + 1}</span>
-                            <span className="text-[#666]">{comic.totalPages} total</span>
+            {groupBy === 'series' ? (
+              seriesGroups.map(({ name, comics }) => (
+                <div key={name} className="col-span-full mt-6">
+                  <h3 className="text-sm font-bold uppercase tracking-widest text-[#555] border-l-4 border-cyan-400 pl-3 mb-3">
+                    {name} ({comics.length})
+                  </h3>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-6">
+                    {comics.map((comic) => {
+                      const progress = comic.totalPages > 1 ? (comic.currentPage / (comic.totalPages - 1)) * 100 : 100;
+                      return (
+                        <div
+                          key={comic.id}
+                          onClick={() => handleOpenComic(comic.id)}
+                          className="flex flex-col gap-2 group cursor-pointer"
+                        >
+                          <div className="aspect-[2/3] bg-[#222] border-2 border-[#333] group-hover:border-cyan-400 overflow-hidden relative shadow-lg">
+                            <div className="absolute inset-0 bg-gradient-to-tr from-cyan-400/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity z-10 pointer-events-none"></div>
+                            {comic.coverImage ? (
+                              <img src={comic.coverImage} alt={comic.title} className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105" />
+                            ) : (
+                              <div className="w-full h-full flex flex-col items-center justify-center p-2">
+                                <div className="bg-black/80 p-2 text-[10px] font-bold uppercase mt-auto text-cyan-400">Page 1</div>
+                              </div>
+                            )}
+                            {comic.isCompleted ? (
+                              <div className="absolute top-2 right-2 z-20 w-4 h-4 rounded-full bg-cyan-400 flex items-center justify-center text-black">
+                                <CheckCircle2 size={12} strokeWidth={3} />
+                              </div>
+                            ) : (
+                              <div className="absolute top-2 right-2 z-20 w-4 h-4 rounded-full bg-cyan-400/50 group-hover:bg-cyan-400 transition-colors"></div>
+                            )}
+                            <button
+                              onClick={(e) => handleDelete(e, comic.id)}
+                              className="absolute top-2 left-2 z-20 bg-black/80 text-red-500 rounded p-2.5 sm:p-1.5 hover:bg-black hover:text-red-400 border border-red-500/50 hover:border-red-400 transition-all"
+                              title="Delete comic"
+                            >
+                              <Trash2 size={16} className="sm:w-3.5 sm:h-3.5" />
+                            </button>
+                            <div className="absolute bottom-0 left-0 right-0 z-20 flex flex-col h-full justify-between pointer-events-none">
+                               <div className="mt-auto">
+                                  <div className="bg-black/90 p-2 text-[10px] font-bold uppercase tracking-tighter w-full border-t border-[#333] flex justify-between">
+                                    <span>Pg {comic.currentPage + 1}</span>
+                                    <span className="text-[#666]">{comic.totalPages} total</span>
+                                  </div>
+                                  <div className="h-1 bg-[#111] overflow-hidden">
+                                    <div
+                                      className="h-full bg-cyan-400 transition-all duration-300"
+                                      style={{ width: `${Math.max(progress, 0)}%` }}
+                                    />
+                                  </div>
+                               </div>
+                            </div>
                           </div>
-                          <div className="h-1 bg-[#111] overflow-hidden">
-                            <div 
-                              className="h-full bg-cyan-400 transition-all duration-300" 
-                              style={{ width: `${Math.max(progress, 0)}%` }}
-                            />
-                          </div>
-                       </div>
-                    </div>
+                          <p className="text-xs font-bold uppercase truncate tracking-wide text-[#CCC] group-hover:text-white transition-colors" title={comic.title}>
+                            {comic.title}
+                          </p>
+                        </div>
+                      );
+                    })}
                   </div>
-                  
-                  <p className="text-xs font-bold uppercase truncate tracking-wide text-[#CCC] group-hover:text-white transition-colors" title={comic.title}>
-                    {comic.title}
-                  </p>
                 </div>
-              );
-            })}
-            
-            <div 
+              ))
+            ) : (
+              filteredComics.map((comic) => {
+                const progress = comic.totalPages > 1 ? (comic.currentPage / (comic.totalPages - 1)) * 100 : 100;
+                return (
+                  <div
+                    key={comic.id}
+                    onClick={() => handleOpenComic(comic.id)}
+                    className="flex flex-col gap-2 group cursor-pointer"
+                  >
+                    <div className="aspect-[2/3] bg-[#222] border-2 border-[#333] group-hover:border-cyan-400 overflow-hidden relative shadow-lg">
+                      <div className="absolute inset-0 bg-gradient-to-tr from-cyan-400/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity z-10 pointer-events-none"></div>
+                      {comic.coverImage ? (
+                        <img src={comic.coverImage} alt={comic.title} className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105" />
+                      ) : (
+                        <div className="w-full h-full flex flex-col items-center justify-center p-2">
+                          <div className="bg-black/80 p-2 text-[10px] font-bold uppercase mt-auto text-cyan-400">Page 1</div>
+                        </div>
+                      )}
+                      {comic.isCompleted ? (
+                        <div className="absolute top-2 right-2 z-20 w-4 h-4 rounded-full bg-cyan-400 flex items-center justify-center text-black">
+                          <CheckCircle2 size={12} strokeWidth={3} />
+                        </div>
+                      ) : (
+                        <div className="absolute top-2 right-2 z-20 w-4 h-4 rounded-full bg-cyan-400/50 group-hover:bg-cyan-400 transition-colors"></div>
+                      )}
+                      <button
+                        onClick={(e) => handleDelete(e, comic.id)}
+                        className="absolute top-2 left-2 z-20 bg-black/80 text-red-500 rounded p-2.5 sm:p-1.5 hover:bg-black hover:text-red-400 border border-red-500/50 hover:border-red-400 transition-all"
+                        title="Delete comic"
+                      >
+                        <Trash2 size={16} className="sm:w-3.5 sm:h-3.5" />
+                      </button>
+                      <div className="absolute bottom-0 left-0 right-0 z-20 flex flex-col h-full justify-between pointer-events-none">
+                         <div className="mt-auto">
+                            <div className="bg-black/90 p-2 text-[10px] font-bold uppercase tracking-tighter w-full border-t border-[#333] flex justify-between">
+                              <span>Pg {comic.currentPage + 1}</span>
+                              <span className="text-[#666]">{comic.totalPages} total</span>
+                            </div>
+                            <div className="h-1 bg-[#111] overflow-hidden">
+                              <div
+                                className="h-full bg-cyan-400 transition-all duration-300"
+                                style={{ width: `${Math.max(progress, 0)}%` }}
+                              />
+                            </div>
+                         </div>
+                      </div>
+                    </div>
+                    <p className="text-xs font-bold uppercase truncate tracking-wide text-[#CCC] group-hover:text-white transition-colors" title={comic.title}>
+                      {comic.title}
+                    </p>
+                  </div>
+                );
+              })
+            )}
+            <div
               className="aspect-[2/3] border-2 border-dashed border-[#333] flex items-center justify-center flex-col gap-2 hover:border-cyan-400 hover:bg-[#111] transition-all group cursor-pointer"
               onClick={() => fileInputRef.current?.click()}
             >
@@ -319,7 +475,7 @@ export default function Library({
             </div>
           </div>
         )}
-
+        
         {comics.length > 0 && (
           <div className="mt-auto border-t border-[#2A2A2A] pt-6 mt-12 flex flex-col gap-4">
             <h4 className="text-xs font-bold text-[#555] uppercase tracking-widest">Reading Stats</h4>

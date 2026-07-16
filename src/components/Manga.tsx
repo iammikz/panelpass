@@ -15,6 +15,8 @@ import {
   getMangaRecord,
   openMangaChapter,
   removeMangaDownload,
+  getMangaHistory,
+  type MangaHistoryEntry,
   type MangaRecord,
 } from '../lib/db';
 import { downloadChapterPages } from '../lib/manga/download';
@@ -54,6 +56,100 @@ export default function Manga({ onOpenSettings }: { onOpenSettings: () => void }
 
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [providerId, setProviderId] = useLocalStorage<string>(MANGA_PROVIDER_KEY, 'mangadex');
+
+  // Multi-select batch download.
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [batchDownloading, setBatchDownloading] = useState(false);
+  const [batchProgress, setBatchProgress] = useState({ done: 0, total: 0 });
+  const [refreshNonce, setRefreshNonce] = useState(0);
+
+  // "Continue Reading" shelf — titles you've opened before (from IndexedDB).
+  const [history, setHistory] = useState<MangaHistoryEntry[]>([]);
+
+  // Parse a chapter's numeric position for ascending sort (e.g. "Ch. 0" → 0).
+  const chapterNumber = (ch: MangaChapter): number => {
+    const n = ch.chapter != null ? parseFloat(ch.chapter) : NaN;
+    return Number.isFinite(n) ? n : Number.POSITIVE_INFINITY;
+  };
+
+  const toggleSelect = useCallback((id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const clearSelection = useCallback(() => setSelectedIds(new Set()), []);
+
+  // Download selected chapters in ascending chapter order, one at a time.
+  // Each chapter is isolated so a single failure (e.g. rate-limit) doesn't
+  // abort the rest; a short delay between chapters avoids hammering the proxy.
+  const downloadSelected = useCallback(async () => {
+    if (selectedIds.size === 0 || batchDownloading) return;
+    const ordered = chapters
+      .filter((ch) => selectedIds.has(ch.id))
+      .sort((a, b) => chapterNumber(a) - chapterNumber(b));
+    setBatchDownloading(true);
+    setBatchProgress({ done: 0, total: ordered.length });
+    let completed = 0;
+    try {
+      for (const ch of ordered) {
+      try {
+        const pid = selected?.providerId || providerId;
+        const mid = selected?.providerMangaId ?? '';
+        let rec = await getMangaRecord(pid, mid, ch.id);
+        if (!rec) {
+          const label = ch.chapter ? `Ch. ${ch.chapter}${ch.title ? ` — ${ch.title}` : ''}` : ch.title || 'Chapter';
+          rec = await openMangaChapter({
+            provider: pid,
+            mangaId: mid,
+            chapterId: ch.id,
+            mangaTitle: undefined,
+            chapterLabel: label,
+            totalPages: ch.pages ?? 0,
+          });
+        }
+        // Retry the page-list fetch — the proxy can 502 on this IP under
+        // heavy probing, and a single transient failure shouldn't drop the chapter.
+        let pages: ChapterPage[] = [];
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            pages = await getChapterPages(pid, ch.id);
+            if (pages.length > 0) break;
+          } catch {
+            /* retry */
+          }
+          await new Promise((r) => setTimeout(r, 1200 * (attempt + 1)));
+        }
+        if (pages.length === 0) throw new Error('no pages after retries');
+        await downloadChapterPages(rec, pages.map((p) => p.url));
+        completed += 1;
+      } catch (err) {
+        console.error('Batch chapter download failed', ch.chapter, err);
+      }
+      setBatchProgress((p) => ({ ...p, done: p.done + 1 }));
+      // Pause between chapters so we don't trip the source's rate limiter.
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+      if (completed > 0) setRefreshNonce((n) => n + 1);
+    } finally {
+      setBatchDownloading(false);
+      setSelectedIds(new Set());
+      setSelectMode(false);
+    }
+  }, [selectedIds, batchDownloading, chapters, selected, providerId]);
+
+  // Load the "Continue Reading" history whenever we return to the home view.
+  useEffect(() => {
+    if (!selected) {
+      getMangaHistory()
+        .then(setHistory)
+        .catch(() => setHistory([]));
+    }
+  }, [selected, refreshNonce]);
 
   // Load the provider list once.
   useEffect(() => {
@@ -141,6 +237,48 @@ export default function Manga({ onOpenSettings }: { onOpenSettings: () => void }
     }
   }, [selected, providerId]);
 
+  // Resume a title from the Continue Reading shelf: re-fetch its chapter list,
+  // select the title, then open the most-recently read chapter directly.
+  const resumeManga = useCallback(async (entry: MangaHistoryEntry) => {
+    const pid = entry.provider;
+    const mid = entry.mangaId;
+    setIsLoadingChapters(true);
+    setChapterError(null);
+    try {
+      const ch = await getChapters(pid, mid);
+      setChapters(ch);
+      const resume = entry.record;
+      const label = resume.chapterLabel || `Ch. ${resume.chapterId}`;
+      const pages = await getChapterPages(pid, resume.chapterId);
+      setSelected({
+        id: mid,
+        providerId: pid,
+        providerMangaId: mid,
+        title: entry.title,
+        coverUrl: undefined,
+        description: undefined,
+        year: undefined,
+      });
+      setReading({
+        pages,
+        target: {
+          kind: 'manga',
+          provider: pid,
+          mangaId: mid,
+          chapterId: resume.chapterId,
+          chapterLabel: label,
+          mangaTitle: entry.title,
+          pageUrls: pages.map((p) => p.url),
+        },
+      });
+    } catch (e) {
+      console.error(e);
+      setChapterError('Could not resume this title.');
+    } finally {
+      setIsLoadingChapters(false);
+    }
+  }, []);
+
   // ---- Unified reader (rendered in place; Back returns to the chapter list) ----
   if (reading && selected) {
     return (
@@ -200,6 +338,47 @@ export default function Manga({ onOpenSettings }: { onOpenSettings: () => void }
 
             {error && (
               <div className="bg-red-500/10 border border-red-500/20 text-red-500 p-4 rounded-lg mb-6">{error}</div>
+            )}
+
+            {/* Continue Reading shelf — titles you've opened before */}
+            {history.length > 0 && (
+              <div className="mb-8">
+                <h3 className="text-xs font-bold uppercase tracking-widest text-[#888] mb-3">Continue Reading</h3>
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
+                  {history.map((entry) => {
+                    const rec = entry.record;
+                    const readChapters = entry.chapters.filter((c) => c.currentPage > 0 || c.isCompleted).length;
+                    const progressPct = rec.totalPages > 1 ? Math.min(100, (rec.currentPage / (rec.totalPages - 1)) * 100) : (rec.isCompleted ? 100 : 0);
+                    const status = rec.isCompleted ? 'Done' : rec.currentPage > 0 ? 'Reading' : 'Unread';
+                    const statusColor = rec.isCompleted ? 'text-emerald-500' : rec.currentPage > 0 ? 'text-amber-400' : 'text-[#666]';
+                    return (
+                      <button
+                        key={`${entry.provider}:${entry.mangaId}`}
+                        onClick={() => resumeManga(entry)}
+                        className="group text-left bg-[#111] border border-[#222] rounded-lg overflow-hidden hover:border-cyan-400 transition-all hover:scale-[1.02]"
+                        title={`Resume ${entry.title}`}
+                      >
+                        <div className="aspect-[3/4] bg-[#1A1A1A] flex items-center justify-center overflow-hidden relative">
+                          <BookOpen size={32} className="text-[#444]" />
+                          <div className={`absolute top-2 right-2 z-20 w-2.5 h-2.5 rounded-full ${rec.isCompleted ? 'bg-emerald-500' : rec.currentPage > 0 ? 'bg-amber-400' : 'bg-[#555]'}`}></div>
+                          <div className="absolute bottom-0 left-0 right-0 h-1 bg-[#111]">
+                            <div className="h-full bg-cyan-400" style={{ width: `${progressPct}%` }} />
+                          </div>
+                        </div>
+                        <div className="p-2">
+                          <p className="text-xs font-bold text-[#DDD] line-clamp-2 leading-tight">{entry.title}</p>
+                          <p className={`text-[10px] mt-1 ${statusColor}`}>
+                            {status} · {rec.chapterLabel || 'Chapter'} · pg {rec.currentPage + 1}/{rec.totalPages}
+                          </p>
+                          {entry.chapters.length > 1 && (
+                            <p className="text-[10px] text-[#666] mt-0.5">{readChapters}/{entry.chapters.length} chapters opened</p>
+                          )}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
             )}
 
             {results.length === 0 && !isSearching && !error && (
@@ -267,14 +446,68 @@ export default function Manga({ onOpenSettings }: { onOpenSettings: () => void }
               <h3 className="text-xs font-bold uppercase tracking-widest text-[#888]">
                 Chapters ({chapters.length})
               </h3>
-              {/* Status legend */}
-              <div className="flex items-center gap-3 text-[10px] uppercase tracking-widest text-[#666]">
-                <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-[#555]" /> Unread</span>
-                <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-amber-400" /> Reading</span>
-                <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-emerald-500" /> Done</span>
-                <span className="flex items-center gap-1"><Download size={11} className="text-cyan-400" /> Saved</span>
+              <div className="flex items-center gap-3">
+                {/* Status legend */}
+                <div className="hidden sm:flex items-center gap-3 text-[10px] uppercase tracking-widest text-[#666]">
+                  <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-[#555]" /> Unread</span>
+                  <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-amber-400" /> Reading</span>
+                  <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-emerald-500" /> Done</span>
+                  <span className="flex items-center gap-1"><Download size={11} className="text-cyan-400" /> Saved</span>
+                </div>
+                <button
+                  onClick={() => {
+                    if (selectMode) {
+                      setSelectMode(false);
+                      setSelectedIds(new Set());
+                    } else {
+                      setSelectMode(true);
+                    }
+                  }}
+                  className={`text-[10px] uppercase tracking-widest px-2 py-1 rounded border transition-colors ${
+                    selectMode
+                      ? 'border-cyan-400 text-cyan-400'
+                      : 'border-[#333] text-[#666] hover:border-cyan-400 hover:text-cyan-400'
+                  }`}
+                >
+                  {selectMode ? 'Cancel' : 'Select'}
+                </button>
               </div>
             </div>
+
+            {/* Batch download toolbar (only in select mode) */}
+            {selectMode && (
+              <div className="flex items-center justify-between gap-3 mb-3 max-w-3xl bg-[#111] border border-[#222] rounded-lg px-4 py-2.5">
+                <span className="text-xs text-[#888] uppercase tracking-widest">
+                  {selectedIds.size} selected
+                  {batchDownloading && batchProgress.total > 0 && (
+                    <span className="ml-2 text-cyan-400 tabular-nums">
+                      {batchProgress.done} / {batchProgress.total}
+                    </span>
+                  )}
+                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={clearSelection}
+                    disabled={batchDownloading || selectedIds.size === 0}
+                    className="text-[10px] uppercase tracking-widest px-3 py-1.5 rounded border border-[#333] text-[#666] hover:border-red-400 hover:text-red-400 transition-colors disabled:opacity-40"
+                  >
+                    Clear
+                  </button>
+                  <button
+                    onClick={downloadSelected}
+                    disabled={batchDownloading || selectedIds.size === 0}
+                    className="text-[10px] uppercase tracking-widest px-3 py-1.5 rounded border border-cyan-400 text-cyan-400 hover:bg-cyan-400 hover:text-black transition-colors disabled:opacity-40 flex items-center gap-1.5"
+                  >
+                    {batchDownloading ? (
+                      <Loader2 size={12} className="animate-spin" />
+                    ) : (
+                      <Download size={12} />
+                    )}
+                    {batchDownloading ? 'Downloading…' : 'Download selected'}
+                  </button>
+                </div>
+              </div>
+            )}
 
             {isLoadingChapters && <Loader2 size={18} className="animate-spin text-cyan-400" />}
             {chapterError && <div className="text-red-500 text-sm">{chapterError}</div>}
@@ -286,7 +519,16 @@ export default function Manga({ onOpenSettings }: { onOpenSettings: () => void }
             <div className="space-y-1 max-w-3xl">
               {chapters.map((ch) => (
                 <Fragment key={ch.id}>
-                  <ChapterRow ch={ch} provider={activeProvider} mangaId={selected.providerMangaId} onOpen={() => openChapter(ch)} />
+                  <ChapterRow
+                    ch={ch}
+                    provider={activeProvider}
+                    mangaId={selected.providerMangaId}
+                    onOpen={() => openChapter(ch)}
+                    selectable={selectMode}
+                    selected={selectedIds.has(ch.id)}
+                    onToggleSelect={() => toggleSelect(ch.id)}
+                    refreshNonce={refreshNonce}
+                  />
                 </Fragment>
               ))}
             </div>
@@ -304,11 +546,19 @@ function ChapterRow({
   provider,
   mangaId,
   onOpen,
+  selectable = false,
+  selected = false,
+  onToggleSelect,
+  refreshNonce = 0,
 }: {
   ch: MangaChapter;
   provider: string;
   mangaId: string;
   onOpen: () => void;
+  selectable?: boolean;
+  selected?: boolean;
+  onToggleSelect?: () => void;
+  refreshNonce?: number;
 }) {
   const [rec, setRec] = useState<MangaRecord | null>(null);
   const [downloading, setDownloading] = useState(false);
@@ -321,7 +571,7 @@ function ChapterRow({
     return () => {
       alive = false;
     };
-  }, [provider, mangaId, ch.id]);
+  }, [provider, mangaId, ch.id, refreshNonce]);
 
   const handleDownload = useCallback(async (e: MouseEvent) => {
     e.stopPropagation();
@@ -371,16 +621,33 @@ function ChapterRow({
   const finished = rec?.isCompleted && rec.lastViewedAt ? new Date(rec.lastViewedAt).toLocaleDateString() : null;
 
   return (
-    <button
-      onClick={onOpen}
-      className={`w-full flex items-center justify-between gap-3 px-4 py-2.5 bg-[#111] border border-[#222] border-l-4 ${style.border} rounded hover:border-cyan-400 transition-colors text-left`}
+    <div
+      className={`w-full flex items-center justify-between gap-3 px-4 py-2.5 bg-[#111] border border-[#222] border-l-4 ${style.border} rounded hover:border-cyan-400 transition-colors text-left ${
+        selectable ? (selected ? 'ring-1 ring-cyan-400/60' : '') : ''
+      }`}
     >
       <span className="flex items-center gap-2 min-w-0">
-        <span className={`w-2 h-2 rounded-full shrink-0 ${style.dot}`} title={style.label} />
-        <span className="text-sm text-[#DDD] truncate">
-          {ch.chapter ? `Ch. ${ch.chapter}` : 'Oneshot'}
-          {ch.title ? ` — ${ch.title}` : ''}
-        </span>
+        {selectable && (
+          <input
+            type="checkbox"
+            checked={selected}
+            onChange={onToggleSelect}
+            onClick={(e) => e.stopPropagation()}
+            className="shrink-0 accent-cyan-400 w-4 h-4 cursor-pointer"
+            aria-label={`Select Ch. ${ch.chapter ?? 'oneshot'}`}
+          />
+        )}
+        <button
+          onClick={onOpen}
+          disabled={selectable}
+          className="flex items-center gap-2 min-w-0 text-left disabled:cursor-default"
+        >
+          <span className={`w-2 h-2 rounded-full shrink-0 ${style.dot}`} title={style.label} />
+          <span className="text-sm text-[#DDD] truncate">
+            {ch.chapter ? `Ch. ${ch.chapter}` : 'Oneshot'}
+            {ch.title ? ` — ${ch.title}` : ''}
+          </span>
+        </button>
       </span>
       <span className="flex items-center gap-3 shrink-0">
         {rec?.downloaded && (
@@ -406,15 +673,16 @@ function ChapterRow({
         {rec?.downloaded ? (
           <button
             onClick={handleRemove}
+            disabled={selectable}
             title="Remove offline copy"
-            className="p-1 text-[#666] hover:text-red-400 transition-colors"
+            className="p-1 text-[#666] hover:text-red-400 transition-colors disabled:opacity-40"
           >
             <Trash2 size={13} />
           </button>
         ) : (
           <button
             onClick={handleDownload}
-            disabled={downloading}
+            disabled={downloading || selectable}
             title="Download for offline reading"
             className="p-1 text-[#666] hover:text-cyan-400 transition-colors disabled:opacity-40"
           >
@@ -422,6 +690,6 @@ function ChapterRow({
           </button>
         )}
       </span>
-    </button>
+    </div>
   );
 }

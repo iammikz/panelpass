@@ -148,6 +148,51 @@ export async function getMangaRecord(
   );
 }
 
+/**
+ * Return every stored MangaRecord (one per opened chapter), newest first.
+ * Used to build the "Continue Reading" shelf and the opened-manga history.
+ */
+export async function listMangaRecords(): Promise<MangaRecord[]> {
+  const list: MangaRecord[] = [];
+  await mangaStorage.iterate<MangaRecord, void>((rec) => {
+    if (rec) list.push(rec);
+  });
+  return list.sort((a, b) => b.lastViewedAt - a.lastViewedAt);
+}
+
+export interface MangaHistoryEntry {
+  provider: string;
+  mangaId: string;
+  /** Most-recently opened chapter record for this title. */
+  record: MangaRecord;
+  /** Every chapter record for this title (newest first). */
+  chapters: MangaRecord[];
+  /** Display title — falls back to the chapter label if no title was stored. */
+  title: string;
+}
+
+/**
+ * Group all MangaRecords by `provider:mangaId` into one history entry per
+ * opened title. The entry's `record` is the most-recently viewed chapter,
+ * making it trivial to render a "Continue Reading" shelf.
+ */
+export async function getMangaHistory(): Promise<MangaHistoryEntry[]> {
+  const records = await listMangaRecords();
+  const byTitle = new Map<string, MangaRecord[]>();
+  for (const rec of records) {
+    const k = `${rec.provider}:${rec.mangaId}`;
+    if (!byTitle.has(k)) byTitle.set(k, []);
+    byTitle.get(k)!.push(rec);
+  }
+  const entries: MangaHistoryEntry[] = [];
+  for (const chapters of byTitle.values()) {
+    const record = chapters[0]; // already newest-first from listMangaRecords
+    const title = record.mangaTitle || record.chapterLabel || 'Unknown title';
+    entries.push({ provider: record.provider, mangaId: record.mangaId, record, chapters, title });
+  }
+  return entries.sort((a, b) => b.record.lastViewedAt - a.record.lastViewedAt);
+}
+
 export async function openMangaChapter(rec: {
   provider: string;
   mangaId: string;
@@ -304,4 +349,109 @@ export async function getOfflinePagesTotal(): Promise<number> {
     if (p) total += p.pageCount;
   }
   return total;
+}
+
+/* ------------------------------------------------------------------ *
+ * Bookmarks & notes (IndexedDB)
+ *
+ * Per-page bookmarks + private notes for both comics and manga chapters.
+ * Each bookmark is keyed by a `scope` string that uniquely identifies the
+ * reading context:
+ *   - comic:  `comic:<comicId>`
+ *   - manga:  `manga:<provider>:<mangaId>:<chapterId>`
+ * Bookmarks are stored in their own localforage store so they never bloat
+ * the comic metadata array.
+ * ------------------------------------------------------------------ */
+
+export type BookmarkScope =
+  | { kind: 'comic'; comicId: string }
+  | { kind: 'manga'; provider: string; mangaId: string; chapterId: string };
+
+export interface Bookmark {
+  id: string;
+  /** Stable scope key — see BookmarkScope. Computed via bookmarkScopeKey(). */
+  scope: string;
+  /** 0-based page index the bookmark points at. */
+  page: number;
+  /** Optional free-text note. */
+  note: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export function bookmarkScopeKey(scope: BookmarkScope): string {
+  if (scope.kind === 'comic') return `comic:${scope.comicId}`;
+  return `manga:${scope.provider}:${scope.mangaId}:${scope.chapterId}`;
+}
+
+const bookmarksStorage = localforage.createInstance({
+  name: 'PanelPass',
+  storeName: 'bookmarks',
+});
+
+async function readScopeBookmarks(scope: string): Promise<Bookmark[]> {
+  const all = await bookmarksStorage.getItem<Bookmark[]>(scope);
+  return all ?? [];
+}
+
+export async function getBookmarks(scope: BookmarkScope): Promise<Bookmark[]> {
+  const list = await readScopeBookmarks(bookmarkScopeKey(scope));
+  return [...list].sort((a, b) => a.page - b.page);
+}
+
+export async function getBookmarkCount(scope: BookmarkScope): Promise<number> {
+  return (await readScopeBookmarks(bookmarkScopeKey(scope))).length;
+}
+
+/** Toggle a bookmark at `page`. If one already exists on that page it is removed. */
+export async function toggleBookmark(
+  scope: BookmarkScope,
+  page: number,
+  note = '',
+): Promise<Bookmark[]> {
+  const key = bookmarkScopeKey(scope);
+  const list = await readScopeBookmarks(key);
+  const existingIdx = list.findIndex((b) => b.page === page);
+  if (existingIdx >= 0) {
+    list.splice(existingIdx, 1);
+  } else {
+    const now = Date.now();
+    list.push({
+      id: `bm_${now}_${Math.random().toString(36).slice(2, 8)}`,
+      scope: key,
+      page,
+      note,
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+  await bookmarksStorage.setItem(key, list);
+  return [...list].sort((a, b) => a.page - b.page);
+}
+
+export async function updateBookmarkNote(
+  scope: BookmarkScope,
+  id: string,
+  note: string,
+): Promise<Bookmark[]> {
+  const key = bookmarkScopeKey(scope);
+  const list = await readScopeBookmarks(key);
+  const bm = list.find((b) => b.id === id);
+  if (bm) {
+    bm.note = note;
+    bm.updatedAt = Date.now();
+    await bookmarksStorage.setItem(key, list);
+  }
+  return [...list].sort((a, b) => a.page - b.page);
+}
+
+export async function removeBookmark(
+  scope: BookmarkScope,
+  id: string,
+): Promise<Bookmark[]> {
+  const key = bookmarkScopeKey(scope);
+  const list = await readScopeBookmarks(key);
+  const next = list.filter((b) => b.id !== id);
+  await bookmarksStorage.setItem(key, next);
+  return [...next].sort((a, b) => a.page - b.page);
 }

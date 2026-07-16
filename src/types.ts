@@ -27,6 +27,8 @@ export interface Comic {
   coverImage?: string; // base64 or blob URL of the first page
   isCompleted: boolean;
   source: ComicSource;
+  /** Optional series name for grouping in the Library. Auto-inferred if omitted. */
+  series?: string;
 }
 
 // Stored separately in IndexedDB to avoid loading huge blobs into memory everywhere

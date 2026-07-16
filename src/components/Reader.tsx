@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { ArrowLeft, Moon, Sun, Smartphone, LayoutPanelLeft, BookOpen, AlignJustify, GalleryVertical, GalleryHorizontal } from 'lucide-react';
-import { getComics, getComicFile, updateComicProgress, getMangaRecord, getMangaPages, openMangaChapter, updateMangaProgress } from '../lib/db';
+import { ArrowLeft, Moon, Sun, Smartphone, LayoutPanelLeft, BookOpen, AlignJustify, GalleryVertical, GalleryHorizontal, Bookmark as BookmarkIcon, X } from 'lucide-react';
+import { getComics, getComicFile, updateComicProgress, getMangaRecord, getMangaPages, openMangaChapter, updateMangaProgress, getBookmarks, toggleBookmark, updateBookmarkNote, removeBookmark, type Bookmark, type BookmarkScope } from '../lib/db';
 import { ComicParser } from '../lib/parser';
 import { type PageSource, RemotePageSource, OfflinePageSource } from '../lib/manga/pageSource';
 import { Comic, Theme } from '../types';
@@ -70,12 +70,40 @@ export default function Reader({
   const allPagesRestoreFrameRef = useRef<number | null>(null);
   const initialAllPagesRestoreRef = useRef(false);
   const allPagesLoadedCountRef = useRef(0);
+  const visiblePageRef = useRef(0);
+  visiblePageRef.current = visiblePage;
   // Touch gesture tracking
   const touchStartXRef = useRef(0);
   const touchStartYRef = useRef(0);
   const touchStartTimeRef = useRef(0);
   const lastTapTimeRef = useRef(0);
   const doubleTapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Bookmarks & notes
+  const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
+  const [showBookmarks, setShowBookmarks] = useState(false);
+  const [editingBookmarkId, setEditingBookmarkId] = useState<string | null>(null);
+  const [bookmarkNoteInput, setBookmarkNoteInput] = useState('');
+
+  // Build the bookmark scope for the current reading context (comic or manga chapter).
+  const getBookmarkScope = useCallback((): BookmarkScope | null => {
+    if (target.kind === 'manga') {
+      return { kind: 'manga', provider: target.provider, mangaId: target.mangaId, chapterId: target.chapterId };
+    }
+    const comic = comicRef.current;
+    if (!comic) return null;
+    return { kind: 'comic', comicId: comic.id };
+  }, [target]);
+
+  const refreshBookmarks = useCallback(async () => {
+    const scope = getBookmarkScope();
+    if (!scope) return;
+    setBookmarks(await getBookmarks(scope));
+  }, [getBookmarkScope]);
+
+  useEffect(() => {
+    void refreshBookmarks();
+  }, [refreshBookmarks]);
 
   // Keep refs in sync so stale closures always read fresh values
   comicRef.current = comic;
@@ -422,6 +450,60 @@ export default function Reader({
     await displayPage(parser, newIdx);
   }, [parser, saveProgress]);
 
+  // Jump directly to an absolute 0-based page index (used by bookmarks + page counter).
+  const gotoPage = useCallback((rawIdx: number) => {
+    const c = comicRef.current;
+    const p = parserRef.current;
+    if (!c) return;
+    let idx = Math.max(0, Math.min(rawIdx, c.totalPages - 1));
+    // In dual-page mode snap to the left page of the spread (even 0-based index)
+    const isDual = readerModeRef.current === 'single' && pageSubModeRef.current === 'dual';
+    if (isDual && idx % 2 !== 0) idx -= 1;
+    if (isAllPages) {
+      const el = pageImgRefs.current[idx];
+      if (el) {
+        el.scrollIntoView({
+          behavior: 'smooth',
+          block: webtoonSubMode === 'all-h' ? 'nearest' : 'start',
+          inline: webtoonSubMode === 'all-h' ? 'start' : 'nearest',
+        });
+      }
+      setVisiblePage(idx);
+    } else if (p) {
+      setComic(prev => prev ? { ...prev, currentPage: idx } : null);
+      saveProgress(idx);
+      void displayPage(p, idx);
+    }
+  }, [isAllPages, webtoonSubMode, saveProgress]);
+
+  // Bookmarks: toggle on the current page, edit notes, remove, and jump.
+  const currentBookmarkPage = () => {
+    const c = comicRef.current;
+    if (!c) return 0;
+    return isAllPages ? visiblePageRef.current : c.currentPage;
+  };
+
+  const handleToggleBookmark = useCallback(async () => {
+    const scope = getBookmarkScope();
+    if (!scope) return;
+    const page = currentBookmarkPage();
+    setBookmarks(await toggleBookmark(scope, page));
+  }, [getBookmarkScope]);
+
+  const handleSaveNote = useCallback(async (id: string) => {
+    const scope = getBookmarkScope();
+    if (!scope) return;
+    setBookmarks(await updateBookmarkNote(scope, id, bookmarkNoteInput));
+    setEditingBookmarkId(null);
+    setBookmarkNoteInput('');
+  }, [getBookmarkScope, bookmarkNoteInput]);
+
+  const handleRemoveBookmark = useCallback(async (id: string) => {
+    const scope = getBookmarkScope();
+    if (!scope) return;
+    setBookmarks(await removeBookmark(scope, id));
+  }, [getBookmarkScope]);
+
   // Desktop click — just toggles the header UI (page turning = keyboard/swipe)
   const handleTap = () => {
     setShowUI(prev => !prev);
@@ -690,6 +772,25 @@ export default function Reader({
             <button onClick={() => setTheme('light')} className={cn('p-2 transition-colors rounded-t sm:rounded-t-none sm:rounded-l', theme === 'light' ? 'bg-cyan-400/20 text-cyan-400' : 'hover:bg-white/5')} title="Light theme"><Sun size={18} /></button>
             <button onClick={() => setTheme('dark')} className={cn('p-2 transition-colors rounded-b sm:rounded-b-none sm:rounded-r', theme === 'dark' ? 'bg-cyan-400/20 text-cyan-400' : 'hover:bg-white/5')} title="Dark theme"><Moon size={18} /></button>
           </div>
+
+          {/* Bookmarks */}
+          <button
+            onClick={() => setShowBookmarks(true)}
+            className={cn(
+              'relative p-2 rounded border transition-colors',
+              bookmarks.some((b) => b.page === currentBookmarkPage())
+                ? 'bg-cyan-400/20 text-cyan-400 border-cyan-400/40'
+                : theme === 'dark' ? 'border-white/10 hover:bg-white/5' : 'border-black/10 hover:bg-white/5',
+            )}
+            title="Bookmarks & notes"
+          >
+            <BookmarkIcon size={18} />
+            {bookmarks.length > 0 && (
+              <span className="absolute -top-1.5 -right-1.5 min-w-[16px] h-4 px-1 rounded-full bg-cyan-400 text-black text-[10px] font-black flex items-center justify-center">
+                {bookmarks.length}
+              </span>
+            )}
+          </button>
         </div>
       </div>
 
@@ -906,6 +1007,103 @@ export default function Reader({
           </div>
         )}
       </div>
+
+      {/* Bookmarks & Notes panel (slide-in from the right) */}
+      {showBookmarks && (
+        <>
+          <div
+            className="absolute inset-0 z-[60] bg-black/50"
+            onClick={() => { setShowBookmarks(false); setEditingBookmarkId(null); }}
+          />
+          <div
+            className={cn(
+              'absolute top-0 right-0 z-[61] h-full w-80 max-w-[85vw] flex flex-col',
+              theme === 'dark' ? 'bg-[#161616] border-l border-[#2A2A2A] text-gray-200' : 'bg-white border-l border-gray-200 text-gray-900',
+            )}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between p-4 border-b border-[#2A2A2A]">
+              <h3 className="text-sm font-bold uppercase tracking-widest">Bookmarks & Notes</h3>
+              <button onClick={() => { setShowBookmarks(false); setEditingBookmarkId(null); }} className="p-1 rounded hover:bg-white/5" title="Close">
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="p-3 border-b border-[#2A2A2A]">
+              <button
+                onClick={handleToggleBookmark}
+                className="w-full bg-cyan-400 text-black text-xs font-black uppercase tracking-widest py-2 rounded hover:scale-[1.02] active:scale-95 transition-transform"
+              >
+                {bookmarks.some((b) => b.page === currentBookmarkPage())
+                  ? `Remove bookmark on page ${currentBookmarkPage() + 1}`
+                  : `Bookmark page ${currentBookmarkPage() + 1}`}
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-3 space-y-2">
+              {bookmarks.length === 0 ? (
+                <p className="text-xs text-[#666] text-center mt-8">
+                  No bookmarks yet. Bookmark the current page to save your spot with an optional note.
+                </p>
+              ) : (
+                bookmarks.map((bm) => (
+                  <div
+                    key={bm.id}
+                    className={cn(
+                      'rounded border p-3 transition-colors',
+                      theme === 'dark' ? 'border-[#2A2A2A] hover:border-cyan-400/40' : 'border-gray-200 hover:border-cyan-400',
+                    )}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <button
+                        onClick={() => { gotoPage(bm.page); setShowBookmarks(false); setEditingBookmarkId(null); }}
+                        className="text-xs font-black text-cyan-400 uppercase tracking-widest hover:underline"
+                      >
+                        Page {bm.page + 1}
+                      </button>
+                      <div className="flex items-center gap-1">
+                        <button
+                          onClick={() => { setEditingBookmarkId(bm.id); setBookmarkNoteInput(bm.note); }}
+                          className="text-[#888] hover:text-cyan-400 text-[11px] font-bold uppercase px-1.5 py-0.5 rounded"
+                          title="Edit note"
+                        >
+                          Note
+                        </button>
+                        <button
+                          onClick={() => handleRemoveBookmark(bm.id)}
+                          className="text-[#888] hover:text-red-400 text-[11px] font-bold uppercase px-1.5 py-0.5 rounded"
+                          title="Remove bookmark"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    </div>
+                    {editingBookmarkId === bm.id ? (
+                      <div className="mt-2 flex flex-col gap-2">
+                        <textarea
+                          value={bookmarkNoteInput}
+                          onChange={(e) => setBookmarkNoteInput(e.target.value)}
+                          placeholder="Add a private note…"
+                          rows={3}
+                          className="w-full bg-[#0F0F0F] border border-[#333] rounded p-2 text-xs text-gray-200 outline-none focus:border-cyan-400 resize-none"
+                        />
+                        <button
+                          onClick={() => handleSaveNote(bm.id)}
+                          className="self-end bg-cyan-400 text-black text-[11px] font-bold uppercase px-3 py-1 rounded"
+                        >
+                          Save
+                        </button>
+                      </div>
+                    ) : (
+                      bm.note && <p className="mt-1.5 text-xs text-[#AAA] whitespace-pre-wrap break-words">{bm.note}</p>
+                    )}
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }

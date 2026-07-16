@@ -34,19 +34,32 @@ export async function downloadChapterPages(
   let done = 0;
 
   // Download sequentially to avoid hammering the backend / getting rate-limited.
+  // Each page retries a few times with backoff — the proxy 502s on this IP under
+  // heavy probing, so transient failures must not drop pages. A hard fetch timeout
+  // (AbortController) prevents a single hung CDN connection from stalling the
+  // whole chapter (and thus a batch download of many chapters).
+  const FETCH_TIMEOUT_MS = 15000;
   for (let i = 0; i < total; i++) {
     const url = pageUrls[i];
-    try {
-      const res = await fetch(url);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const type = res.headers.get('content-type') || '';
-      if (!type.startsWith('image/')) throw new Error(`not an image (${type || 'unknown'})`);
-      blobs[i] = await res.blob();
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      // Keep null; report but continue so one bad image doesn't tank the chapter.
-      cb.onError?.(i, msg);
+    let blob: Blob | null = null;
+    for (let attempt = 0; attempt < 3 && !blob; attempt++) {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
+      try {
+        const res = await fetch(url, { signal: ctrl.signal });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const type = res.headers.get('content-type') || '';
+        if (!type.startsWith('image/')) throw new Error(`not an image (${type || 'unknown'})`);
+        blob = await res.blob();
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        cb.onError?.(i, `attempt ${attempt + 1}: ${msg}`);
+        if (attempt < 2) await new Promise((r) => setTimeout(r, 800 * (attempt + 1)));
+      } finally {
+        clearTimeout(timer);
+      }
     }
+    blobs[i] = blob;
     done += 1;
     cb.onProgress?.(done, total);
   }

@@ -126,6 +126,9 @@ export interface MangaRecord {
   chapterId: string;
   mangaTitle?: string;
   chapterLabel?: string;
+  /** Cover image URL (from the source) — persisted on first open so the
+   *  Continue Reading shelf can render real art without re-fetching. */
+  coverUrl?: string | null;
   currentPage: number;
   totalPages: number;
   isCompleted: boolean;
@@ -199,6 +202,7 @@ export async function openMangaChapter(rec: {
   chapterId: string;
   mangaTitle?: string;
   chapterLabel?: string;
+  coverUrl?: string | null;
   totalPages: number;
 }): Promise<MangaRecord> {
   const key = mangaKey(rec.provider, rec.mangaId, rec.chapterId);
@@ -211,6 +215,7 @@ export async function openMangaChapter(rec: {
     chapterId: rec.chapterId,
     mangaTitle: rec.mangaTitle ?? existing?.mangaTitle,
     chapterLabel: rec.chapterLabel ?? existing?.chapterLabel,
+    coverUrl: rec.coverUrl ?? existing?.coverUrl,
     currentPage: existing?.currentPage ?? 0,
     totalPages: rec.totalPages,
     isCompleted: existing?.isCompleted ?? false,

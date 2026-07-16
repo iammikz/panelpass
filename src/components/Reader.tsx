@@ -18,6 +18,9 @@ export interface MangaReaderTarget {
   chapterId: string;
   chapterLabel?: string;
   mangaTitle?: string;
+  /** Cover image URL (from the source) — persisted so the Continue Reading
+   *  shelf can render real art without re-fetching. */
+  coverUrl?: string | null;
   /** Pre-fetched, proxied page image URLs (from the backend /api/source dispatch). */
   pageUrls: string[];
 }
@@ -366,6 +369,7 @@ export default function Reader({
           chapterId: target.chapterId,
           mangaTitle: target.mangaTitle,
           chapterLabel: target.chapterLabel,
+          coverUrl: target.coverUrl ?? null,
           totalPages,
         });
       }

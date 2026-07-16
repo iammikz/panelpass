@@ -109,6 +109,7 @@ export default function Manga({ onOpenSettings }: { onOpenSettings: () => void }
             chapterId: ch.id,
             mangaTitle: undefined,
             chapterLabel: label,
+            coverUrl: selected?.coverUrl ?? null,
             totalPages: ch.pages ?? 0,
           });
         }
@@ -226,6 +227,7 @@ export default function Manga({ onOpenSettings }: { onOpenSettings: () => void }
           chapterId: ch.id,
           chapterLabel: label,
           mangaTitle: selected.title,
+          coverUrl: selected.coverUrl,
           pageUrls: pages.map((p) => p.url),
         },
       });
@@ -255,7 +257,7 @@ export default function Manga({ onOpenSettings }: { onOpenSettings: () => void }
         providerId: pid,
         providerMangaId: mid,
         title: entry.title,
-        coverUrl: undefined,
+        coverUrl: entry.record.coverUrl ?? undefined,
         description: undefined,
         year: undefined,
       });
@@ -268,6 +270,7 @@ export default function Manga({ onOpenSettings }: { onOpenSettings: () => void }
           chapterId: resume.chapterId,
           chapterLabel: label,
           mangaTitle: entry.title,
+          coverUrl: entry.record.coverUrl ?? null,
           pageUrls: pages.map((p) => p.url),
         },
       });
@@ -340,47 +343,6 @@ export default function Manga({ onOpenSettings }: { onOpenSettings: () => void }
               <div className="bg-red-500/10 border border-red-500/20 text-red-500 p-4 rounded-lg mb-6">{error}</div>
             )}
 
-            {/* Continue Reading shelf — titles you've opened before */}
-            {history.length > 0 && (
-              <div className="mb-8">
-                <h3 className="text-xs font-bold uppercase tracking-widest text-[#888] mb-3">Continue Reading</h3>
-                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
-                  {history.map((entry) => {
-                    const rec = entry.record;
-                    const readChapters = entry.chapters.filter((c) => c.currentPage > 0 || c.isCompleted).length;
-                    const progressPct = rec.totalPages > 1 ? Math.min(100, (rec.currentPage / (rec.totalPages - 1)) * 100) : (rec.isCompleted ? 100 : 0);
-                    const status = rec.isCompleted ? 'Done' : rec.currentPage > 0 ? 'Reading' : 'Unread';
-                    const statusColor = rec.isCompleted ? 'text-emerald-500' : rec.currentPage > 0 ? 'text-amber-400' : 'text-[#666]';
-                    return (
-                      <button
-                        key={`${entry.provider}:${entry.mangaId}`}
-                        onClick={() => resumeManga(entry)}
-                        className="group text-left bg-[#111] border border-[#222] rounded-lg overflow-hidden hover:border-cyan-400 transition-all hover:scale-[1.02]"
-                        title={`Resume ${entry.title}`}
-                      >
-                        <div className="aspect-[3/4] bg-[#1A1A1A] flex items-center justify-center overflow-hidden relative">
-                          <BookOpen size={32} className="text-[#444]" />
-                          <div className={`absolute top-2 right-2 z-20 w-2.5 h-2.5 rounded-full ${rec.isCompleted ? 'bg-emerald-500' : rec.currentPage > 0 ? 'bg-amber-400' : 'bg-[#555]'}`}></div>
-                          <div className="absolute bottom-0 left-0 right-0 h-1 bg-[#111]">
-                            <div className="h-full bg-cyan-400" style={{ width: `${progressPct}%` }} />
-                          </div>
-                        </div>
-                        <div className="p-2">
-                          <p className="text-xs font-bold text-[#DDD] line-clamp-2 leading-tight">{entry.title}</p>
-                          <p className={`text-[10px] mt-1 ${statusColor}`}>
-                            {status} · {rec.chapterLabel || 'Chapter'} · pg {rec.currentPage + 1}/{rec.totalPages}
-                          </p>
-                          {entry.chapters.length > 1 && (
-                            <p className="text-[10px] text-[#666] mt-0.5">{readChapters}/{entry.chapters.length} chapters opened</p>
-                          )}
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
             {results.length === 0 && !isSearching && !error && (
               <div className="text-[#555] text-sm mt-8">
                 {query.trim() ? 'No results.' : 'Type a title above to search (online).'}
@@ -415,6 +377,83 @@ export default function Manga({ onOpenSettings }: { onOpenSettings: () => void }
                 ))}
               </div>
             )}
+
+            {/* Continue Reading shelf — titles you've opened before (below search results) */}
+            {history.length > 0 && (
+              <div className="mt-10">
+                <h3 className="text-xs font-bold uppercase tracking-widest text-[#888] mb-3">Continue Reading</h3>
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
+                  {history.map((entry) => {
+                    const rec = entry.record;
+                    const cover = rec.coverUrl || null;
+                    const readChapters = entry.chapters.filter((c) => c.currentPage > 0 || c.isCompleted).length;
+                    const progressPct = rec.totalPages > 1 ? Math.min(100, (rec.currentPage / (rec.totalPages - 1)) * 100) : (rec.isCompleted ? 100 : 0);
+                    const status = rec.isCompleted ? 'Done' : rec.currentPage > 0 ? 'Reading' : 'Unread';
+                    const statusColor = rec.isCompleted ? 'text-emerald-500' : rec.currentPage > 0 ? 'text-amber-400' : 'text-[#666]';
+                    return (
+                      <button
+                        key={`${entry.provider}:${entry.mangaId}`}
+                        onClick={() => resumeManga(entry)}
+                        className="group text-left bg-[#111] border border-[#222] rounded-lg overflow-hidden hover:border-cyan-400 transition-all hover:scale-[1.02]"
+                        title={`Resume ${entry.title}`}
+                      >
+                        <div className="aspect-[3/4] bg-[#1A1A1A] flex items-center justify-center overflow-hidden relative">
+                          {cover ? (
+                            <img src={cover} alt={entry.title} loading="lazy" className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
+                          ) : (
+                            <BookOpen size={32} className="text-[#444]" />
+                          )}
+                          <div className={`absolute top-2 right-2 z-20 w-2.5 h-2.5 rounded-full ${rec.isCompleted ? 'bg-emerald-500' : rec.currentPage > 0 ? 'bg-amber-400' : 'bg-[#555]'}`}></div>
+                          <div className="absolute bottom-0 left-0 right-0 h-1 bg-[#111]">
+                            <div className="h-full bg-cyan-400" style={{ width: `${progressPct}%` }} />
+                          </div>
+                        </div>
+                        <div className="p-2">
+                          <p className="text-xs font-bold text-[#DDD] line-clamp-2 leading-tight">{entry.title}</p>
+                          <p className={`text-[10px] mt-1 ${statusColor}`}>
+                            {status} · {rec.chapterLabel || 'Chapter'} · pg {rec.currentPage + 1}/{rec.totalPages}
+                          </p>
+                          {entry.chapters.length > 1 && (
+                            <p className="text-[10px] text-[#666] mt-0.5">{readChapters}/{entry.chapters.length} chapters opened</p>
+                          )}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Manga reading stats */}
+            {history.length > 0 && (() => {
+              const titles = history.length;
+              const chaptersRead = history.reduce((acc, e) => acc + e.chapters.filter((c) => c.currentPage > 0 || c.isCompleted).length, 0);
+              const pagesRead = history.reduce((acc, e) => acc + e.chapters.reduce((s, c) => s + (c.isCompleted ? c.totalPages : Math.min(c.currentPage + 1, c.totalPages)), 0), 0);
+              const completed = history.filter((e) => e.record.isCompleted).length;
+              return (
+                <div className="mt-10 border-t border-[#2A2A2A] pt-6">
+                  <h4 className="text-xs font-bold text-[#555] uppercase tracking-widest mb-4">Manga Stats</h4>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                    <div className="bg-[#161616] p-4 rounded border border-[#222] relative overflow-hidden">
+                      <p className="text-[10px] text-[#888] font-bold uppercase mb-1">Titles Opened</p>
+                      <p className="text-2xl font-black italic font-display">{titles}</p>
+                    </div>
+                    <div className="bg-[#161616] p-4 rounded border border-[#222] relative overflow-hidden">
+                      <p className="text-[10px] text-[#888] font-bold uppercase mb-1">Chapters Read</p>
+                      <p className="text-2xl font-black italic font-display text-cyan-400">{chaptersRead}</p>
+                    </div>
+                    <div className="bg-[#161616] p-4 rounded border border-[#222] relative overflow-hidden">
+                      <p className="text-[10px] text-[#888] font-bold uppercase mb-1">Pages Read</p>
+                      <p className="text-2xl font-black italic font-display">{pagesRead}</p>
+                    </div>
+                    <div className="bg-[#161616] p-4 rounded border border-[#222] relative overflow-hidden">
+                      <p className="text-[10px] text-[#888] font-bold uppercase mb-1">Completed</p>
+                      <p className="text-2xl font-black italic font-display text-emerald-500">{completed}</p>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
           </>
         ) : (
           /* Detail / chapter list */
@@ -527,6 +566,7 @@ export default function Manga({ onOpenSettings }: { onOpenSettings: () => void }
                     selectable={selectMode}
                     selected={selectedIds.has(ch.id)}
                     onToggleSelect={() => toggleSelect(ch.id)}
+                    coverUrl={selected.coverUrl}
                     refreshNonce={refreshNonce}
                   />
                 </Fragment>
@@ -549,6 +589,7 @@ function ChapterRow({
   selectable = false,
   selected = false,
   onToggleSelect,
+  coverUrl,
   refreshNonce = 0,
 }: {
   ch: MangaChapter;
@@ -558,6 +599,7 @@ function ChapterRow({
   selectable?: boolean;
   selected?: boolean;
   onToggleSelect?: () => void;
+  coverUrl?: string | null;
   refreshNonce?: number;
 }) {
   const [rec, setRec] = useState<MangaRecord | null>(null);
@@ -590,6 +632,7 @@ function ChapterRow({
           chapterId: ch.id,
           mangaTitle: undefined,
           chapterLabel: label,
+          coverUrl: coverUrl ?? null,
           totalPages: ch.pages ?? 0,
         });
         setRec(recToUse);

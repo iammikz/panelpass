@@ -1,28 +1,45 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { ArrowLeft, Moon, Sun, Smartphone, LayoutPanelLeft, BookOpen, AlignJustify, GalleryVertical, GalleryHorizontal } from 'lucide-react';
-import { getComics, getComicFile, updateComicProgress } from '../lib/db';
+import { getComics, getComicFile, updateComicProgress, getMangaRecord, getMangaPages, openMangaChapter, updateMangaProgress } from '../lib/db';
 import { ComicParser } from '../lib/parser';
+import { type PageSource, RemotePageSource, OfflinePageSource } from '../lib/manga/pageSource';
 import { Comic, Theme } from '../types';
 import { cn } from '../lib/utils';
 import { useLocalStorage } from 'usehooks-ts';
 
+export interface ReaderTarget {
+  kind: 'comic';
+  comicId: string;
+}
+export interface MangaReaderTarget {
+  kind: 'manga';
+  provider: string;
+  mangaId: string;
+  chapterId: string;
+  chapterLabel?: string;
+  mangaTitle?: string;
+  /** Pre-fetched, proxied page image URLs (from the backend /api/source dispatch). */
+  pageUrls: string[];
+}
+
 export default function Reader({
-  comicId,
+  target,
   onBack,
 }: {
-  comicId: string;
+  target: ReaderTarget | MangaReaderTarget;
   onBack: () => void;
 }) {
   type PageSubMode = 'single' | 'dual';
   type WebtoonSubMode = 'single' | 'all-v' | 'all-h';
 
   const [comic, setComic] = useState<Comic | null>(null);
-  const [parser, setParser] = useState<ComicParser | null>(null);
+  const [parser, setParser] = useState<PageSource | null>(null);
   const [pageUrl, setPageUrl] = useState<string>('');
   const [pageUrl2, setPageUrl2] = useState<string>('');
   const [nextPageUrl, setNextPageUrl] = useState<string>('');
   const [allPageUrls, setAllPageUrls] = useState<string[]>([]);
   const [isLoadingAll, setIsLoadingAll] = useState(false);
+  const [allPagesImagesLoaded, setAllPagesImagesLoaded] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -31,7 +48,8 @@ export default function Reader({
   const [isZoomed, setIsZoomed] = useState(false);
   const [zoomOrigin, setZoomOrigin] = useState({ x: 50, y: 50 });
   const comicRef = useRef<Comic | null>(null);
-  const parserRef = useRef<ComicParser | null>(null);
+  const parserRef = useRef<PageSource | null>(null);
+  const offlineParserRef = useRef<OfflinePageSource | null>(null);
   const pageUrlRef = useRef<string>('');
   const pageUrl2Ref = useRef<string>('');
   const nextPageUrlRef = useRef<string>('');
@@ -48,8 +66,10 @@ export default function Reader({
   const pageImgRefs = useRef<(HTMLElement | null)[]>([]);
   const pageCounterInputRef = useRef<HTMLInputElement>(null);
   const saveProgressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingSavePageRef = useRef<number | null>(null);
   const allPagesRestoreFrameRef = useRef<number | null>(null);
   const initialAllPagesRestoreRef = useRef(false);
+  const allPagesLoadedCountRef = useRef(0);
   // Touch gesture tracking
   const touchStartXRef = useRef(0);
   const touchStartYRef = useRef(0);
@@ -76,25 +96,75 @@ export default function Reader({
 
   const isAllPages = readerMode === 'webtoon' && webtoonSubMode !== 'single';
 
+  // Manga record (when reading an online chapter). null for local CBZ comics.
+  const recordRef = useRef<{
+    provider: string;
+    mangaId: string;
+    chapterId: string;
+  } | null>(null);
+
+  // Persist progress to the correct store (CBZ → Comic, manga → MangaRecord).
+  const saveProgress = useCallback((currentPage: number) => {
+    const comic = comicRef.current;
+    const rec = recordRef.current;
+    if (rec) {
+      updateMangaProgress(rec.provider, rec.mangaId, rec.chapterId, currentPage).catch(console.error);
+    } else if (comic) {
+      updateComicProgress(comic.id, currentPage).catch(console.error);
+    }
+  }, []);
+
+  // Flush any pending progress write (webtoon scroll path uses a debounced timer).
+  const flushPendingSave = useCallback(() => {
+    if (saveProgressTimerRef.current) {
+      clearTimeout(saveProgressTimerRef.current);
+      saveProgressTimerRef.current = null;
+      const page = pendingSavePageRef.current;
+      if (page !== null) saveProgress(page);
+    }
+  }, [saveProgress]);
+
+  useEffect(() => {
+    // Persist the last read position if the tab/app is hidden or closed mid-scroll.
+    const onHide = () => flushPendingSave();
+    window.addEventListener('pagehide', onHide);
+    document.addEventListener('visibilitychange', onHide);
+    return () => {
+      window.removeEventListener('pagehide', onHide);
+      document.removeEventListener('visibilitychange', onHide);
+    };
+  }, [flushPendingSave]);
+
   useEffect(() => {
     loadComicFiles();
     return () => {
       // Clean up object URLs on unmount using refs so the latest URLs are revoked
       if (hideUITimerRef.current) clearTimeout(hideUITimerRef.current);
       if (doubleTapTimerRef.current) clearTimeout(doubleTapTimerRef.current);
-      if (saveProgressTimerRef.current) clearTimeout(saveProgressTimerRef.current);
+      // IMPORTANT: flush the debounced progress write instead of just dropping it,
+      // otherwise the last webtoon-scroll position is lost when leaving the reader.
+      flushPendingSave();
       if (allPagesRestoreFrameRef.current) cancelAnimationFrame(allPagesRestoreFrameRef.current);
       if (pageUrlRef.current) URL.revokeObjectURL(pageUrlRef.current);
       if (pageUrl2Ref.current) URL.revokeObjectURL(pageUrl2Ref.current);
       if (nextPageUrlRef.current) URL.revokeObjectURL(nextPageUrlRef.current);
       allPageUrlsRef.current.forEach((u) => URL.revokeObjectURL(u));
+      allPageUrlsRef.current = [];
+      // Offline chapters pre-create a blob: URL per page; revoke any still held
+      // by the parser (single-mode scratch URLs are covered above).
+      if (offlineParserRef.current) {
+        offlineParserRef.current.revokeAll();
+        offlineParserRef.current = null;
+      }
     };
-  }, [comicId]);
+  }, [target, flushPendingSave]);
 
   // Load/unload all page blobs when switching in/out of webtoon-all mode
   useEffect(() => {
     if (isAllPages && parser) {
       initialAllPagesRestoreRef.current = true;
+      allPagesLoadedCountRef.current = 0;
+      setAllPagesImagesLoaded(false);
       void loadAllPages();
     } else {
       initialAllPagesRestoreRef.current = false;
@@ -138,15 +208,18 @@ export default function Reader({
     // Keep comic state in sync so header/scrubber reflects scroll position
     setComic(prev => prev ? { ...prev, currentPage: visiblePage } : null);
     // Debounce the IndexedDB write to avoid hammering on every scroll tick
+    pendingSavePageRef.current = visiblePage;
     if (saveProgressTimerRef.current) clearTimeout(saveProgressTimerRef.current);
     saveProgressTimerRef.current = setTimeout(() => {
-      updateComicProgress(c.id, visiblePage).catch(console.error);
+      saveProgress(visiblePage);
     }, 600);
   }, [visiblePage, isAllPages]);
 
-  // Restore the saved page once all page elements exist in webtoon all-pages mode.
+  // Restore the saved page once ALL page images have finished loading in webtoon all-pages mode.
+  // Gating on load completion (not just element existence) ensures every image has its final
+  // height before we scrollIntoView, so the resume lands exactly on the saved page.
   useEffect(() => {
-    if (!isAllPages || isLoadingAll || allPageUrls.length === 0) return;
+    if (!isAllPages || isLoadingAll || allPageUrls.length === 0 || !allPagesImagesLoaded) return;
     const c = comicRef.current;
     if (!c) return;
     const targetPage = Math.max(0, Math.min(c.currentPage, c.totalPages - 1));
@@ -170,7 +243,7 @@ export default function Reader({
         });
       });
     });
-  }, [isAllPages, isLoadingAll, allPageUrls, webtoonSubMode]);
+  }, [isAllPages, isLoadingAll, allPageUrls, webtoonSubMode, allPagesImagesLoaded]);
 
   // Re-display current page when sub-mode changes (e.g. single↔dual, webtoon-all→single)
   useEffect(() => {
@@ -209,32 +282,82 @@ export default function Reader({
   const loadComicFiles = async () => {
     try {
       setIsLoading(true);
-      const comics = await getComics();
-      const meta = comics.find(c => c.id === comicId);
-      if (!meta) throw new Error("Comic metadata not found");
-      
+
+      let _parser: PageSource;
+      let meta: Comic;
+
+      if (target.kind === 'comic') {
+        const comics = await getComics();
+        const found = comics.find((c) => c.id === target.comicId);
+        if (!found) throw new Error('Comic metadata not found');
+        meta = found;
+        const fileBlob = await getComicFile(target.comicId);
+        if (!fileBlob) throw new Error('Comic file not found on device');
+        const cp = new ComicParser();
+        await cp.load(fileBlob);
+        _parser = cp;
+        recordRef.current = null;
+      } else {
+        // Online manga chapter: pages come pre-fetched + proxied; restore from IndexedDB record.
+        const rec = await getMangaRecord(target.provider, target.mangaId, target.chapterId);
+        const totalPages = target.pageUrls.length;
+        const startPage = rec?.currentPage ?? 0;
+        meta = {
+          id: rec?.key ?? `${target.provider}:${target.mangaId}:${target.chapterId}`,
+          title: target.mangaTitle ?? target.chapterLabel ?? 'Manga',
+          addedAt: rec?.addedAt ?? Date.now(),
+          lastViewedAt: rec?.lastViewedAt ?? Date.now(),
+          currentPage: startPage,
+          totalPages,
+          isCompleted: rec?.isCompleted ?? false,
+          source: { type: 'local' },
+        };
+        // Prefer offline blobs if this chapter was downloaded; otherwise stream
+        // from the (proxied) network URLs.
+        if (rec?.downloaded) {
+          const stored = await getMangaPages(target.provider, target.mangaId, target.chapterId);
+          if (stored && stored.blobs.length > 0) {
+            const offline = new OfflinePageSource(stored.blobs);
+            _parser = offline;
+            offlineParserRef.current = offline;
+          } else {
+            _parser = new RemotePageSource(target.pageUrls);
+          }
+        } else {
+          _parser = new RemotePageSource(target.pageUrls);
+        }
+        recordRef.current = {
+          provider: target.provider,
+          mangaId: target.mangaId,
+          chapterId: target.chapterId,
+        };
+        // Record the open (lastViewedAt + ensure persisted) even on first view.
+        await openMangaChapter({
+          provider: target.provider,
+          mangaId: target.mangaId,
+          chapterId: target.chapterId,
+          mangaTitle: target.mangaTitle,
+          chapterLabel: target.chapterLabel,
+          totalPages,
+        });
+      }
+
       setComic(meta);
-
-      const fileBlob = await getComicFile(comicId);
-      if (!fileBlob) throw new Error("Comic file not found on device");
-
-      const _parser = new ComicParser();
-      await _parser.load(fileBlob);
       setParser(_parser);
-      
+
       await displayPage(_parser, meta.currentPage);
       setIsLoading(false);
-      
+
       // Auto-hide UI after small delay
       hideUITimerRef.current = setTimeout(() => setShowUI(false), 2000);
     } catch (err) {
       console.error(err);
-      setError("Failed to load comic. It may be corrupted or deleted.");
+      setError('Failed to load. The file may be corrupted, deleted, or the network is unavailable.');
       setIsLoading(false);
     }
   };
 
-  const displayPage = async (p: ComicParser, index: number) => {
+  const displayPage = async (p: PageSource, index: number) => {
     try {
       parserRef.current = p;
       const url = await getPageBlobUrlForIndex(index);
@@ -294,10 +417,10 @@ export default function Reader({
     setComic(prev => prev ? { ...prev, currentPage: newIdx } : null);
     
     // Save progress asynchronously
-    updateComicProgress(current.id, newIdx).catch(console.error);
+    saveProgress(newIdx);
     
     await displayPage(parser, newIdx);
-  }, [parser]);
+  }, [parser, saveProgress]);
 
   // Desktop click — just toggles the header UI (page turning = keyboard/swipe)
   const handleTap = () => {
@@ -434,7 +557,7 @@ export default function Reader({
       // Direct jump — bypass handleTurnPage which treats its arg as a turn count
       // (turn count × step would give the wrong result in dual-page mode)
       setComic(prev => prev ? { ...prev, currentPage: idx } : null);
-      updateComicProgress(c.id, idx).catch(console.error);
+      saveProgress(idx);
       const p = parserRef.current;
       if (p) void displayPage(p, idx);
     }
@@ -612,6 +735,21 @@ export default function Reader({
                     webtoonSubMode === 'all-h' ? 'h-full w-auto' : 'w-full max-w-3xl',
                   )}
                   draggable={false}
+                  onLoad={() => {
+                    // Count completed image decodes so the resume scroll waits until
+                    // every page has its final height before we scrollIntoView.
+                    allPagesLoadedCountRef.current += 1;
+                    if (allPagesLoadedCountRef.current >= allPageUrls.length) {
+                      setAllPagesImagesLoaded(true);
+                    }
+                  }}
+                  onError={() => {
+                    // Don't let a single failed image block the resume scroll forever.
+                    allPagesLoadedCountRef.current += 1;
+                    if (allPagesLoadedCountRef.current >= allPageUrls.length) {
+                      setAllPagesImagesLoaded(true);
+                    }
+                  }}
                 />
               ))}
             </div>

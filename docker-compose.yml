@@ -6,4 +6,16 @@ services:
     container_name: panelpass
     ports:
       - "8787:80"
+    depends_on:
+      - panelpass-api
+    restart: unless-stopped
+
+  panelpass-api:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    image: panelpass-api:latest
+    container_name: panelpass-api
+    expose:
+      - "8788"
     restart: unless-stopped

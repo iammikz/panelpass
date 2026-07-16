@@ -1,0 +1,16 @@
+{
+  "name": "panelpass-api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "PanelPass backend: MangaDex proxy + (future) user accounts / online history.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "dependencies": {
+    "@consumet/extensions": "^1.8.8",
+    "express": "^4.19.2"
+  }
+}

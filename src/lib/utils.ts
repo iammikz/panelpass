@@ -26,6 +26,28 @@ export function formatTime(timestamp: number) {
  *      "One Piece ch. 1024 - Wano"          -> "One Piece"
  *      "Spy x Family 12"                    -> "Spy x Family"
  */
+/**
+ * Extract a sortable chapter number from a chapter label.
+ *
+ * Manga sources (especially volume-based ones like "Overgeared (Volume)")
+ * return chapter labels such as "Vol. 1 Chapter 10", "Ch. 3", "1", or even
+ * non-numeric oneshots. A naive `parseFloat("Vol. 1 Chapter 10")` yields NaN,
+ * which collapses every chapter to the same sort bucket and breaks Next/Prev
+ * ordering. This finds the LAST number in the string (the chapter number),
+ * falling back to the first number, then to +Infinity for unnumbered entries.
+ */
+export function parseChapterNumber(chapter: string | null | undefined, title?: string | null): number {
+  const text = (chapter ?? title ?? '').toString();
+  if (!text.trim()) return Number.POSITIVE_INFINITY;
+  // Prefer the last number in the string ("Vol. 1 Chapter 10" -> 10).
+  const all = text.match(/\d+(\.\d+)?/g);
+  if (all && all.length > 0) {
+    const n = parseFloat(all[all.length - 1]);
+    if (Number.isFinite(n)) return n;
+  }
+  return Number.POSITIVE_INFINITY;
+}
+
 export function inferSeries(title: string): string {
   let t = title.trim();
   // Drop anything in parentheses / brackets.

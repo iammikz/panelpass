@@ -16,6 +16,18 @@ const mangaStorage = localforage.createInstance({
   storeName: 'manga',
 });
 
+// Per-manga reader preferences (mode / sub-mode / zoom), keyed by provider:mangaId.
+const mangaPrefsStorage = localforage.createInstance({
+  name: 'PanelPass',
+  storeName: 'mangaPrefs',
+});
+
+// Favorited (starred) manga titles, keyed by provider:mangaId.
+const mangaFavStorage = localforage.createInstance({
+  name: 'PanelPass',
+  storeName: 'mangaFavorites',
+});
+
 export async function getComics(): Promise<Comic[]> {
   const comics = await metadataStorage.getItem<Comic[]>('comics');
   if (!comics) {
@@ -334,6 +346,31 @@ export async function removeMangaDownload(
   }
 }
 
+/**
+ * Full removal of a manga from the library:
+ *  - deletes every downloaded page blob under this manga
+ *  - deletes every MangaRecord for every chapter
+ *  - removes the Continue Reading history entry
+ *  - clears per-manga reader prefs
+ *  - clears favorite/star if present
+ */
+export async function removeManga(provider: string, mangaId: string): Promise<void> {
+  const prefix = `${provider}:${mangaId}:`;
+  const keys: string[] = [];
+  await mangaStorage.iterate<string, void>((value, key) => {
+    if (typeof key === 'string' && key.startsWith(prefix)) keys.push(key);
+  });
+  await mangaPagesStorage.iterate<string, void>((_value, key) => {
+    if (typeof key === 'string' && key.startsWith(prefix)) keys.push(key);
+  });
+  for (const key of keys) {
+    try { await mangaStorage.removeItem(key); } catch {}
+    try { await mangaPagesStorage.removeItem(key); } catch {}
+  }
+  await mangaPrefsStorage.removeItem(`${provider}:${mangaId}`);
+  await mangaFavStorage.removeItem(`${provider}:${mangaId}`);
+}
+
 export async function getMangaDownloadProgress(
   provider: string,
   mangaId: string,
@@ -459,4 +496,70 @@ export async function removeBookmark(
   const next = list.filter((b) => b.id !== id);
   await bookmarksStorage.setItem(key, next);
   return [...next].sort((a, b) => a.page - b.page);
+}
+
+/* ------------------------------------------------------------------ *
+ * Per-manga reader preferences
+ *
+ * Reader display settings (page mode, sub-mode, zoom) remembered per
+ * title (provider:mangaId) so each manga opens the way you left it.
+ * Falls back to the global defaults when nothing is stored.
+ * ------------------------------------------------------------------ */
+
+export type ReaderMode = 'single' | 'webtoon';
+export type PageSubMode = 'single' | 'dual';
+export type WebtoonSubMode = 'single' | 'all-v' | 'all-h';
+
+export interface MangaReaderPrefs {
+  readerMode?: ReaderMode;
+  pageSubMode?: PageSubMode;
+  webtoonSubMode?: WebtoonSubMode;
+  /** Zoom factor as a percentage (100, 125, 150, 200...). */
+  zoom?: number;
+}
+
+function mangaPrefsKey(provider: string, mangaId: string): string {
+  return `${provider}:${mangaId}`;
+}
+
+export async function getMangaPrefs(
+  provider: string,
+  mangaId: string,
+): Promise<MangaReaderPrefs> {
+  return (
+    (await mangaPrefsStorage.getItem<MangaReaderPrefs>(
+      mangaPrefsKey(provider, mangaId),
+    )) ?? {}
+  );
+}
+
+export async function saveMangaPrefs(
+  provider: string,
+  mangaId: string,
+  prefs: MangaReaderPrefs,
+): Promise<void> {
+  await mangaPrefsStorage.setItem(mangaPrefsKey(provider, mangaId), prefs);
+}
+
+/* ------------------------------------------------------------------ *
+ * Manga favorites (starred titles)
+ * ------------------------------------------------------------------ */
+
+export async function isMangaFavorite(
+  provider: string,
+  mangaId: string,
+): Promise<boolean> {
+  return (await mangaFavStorage.getItem(mangaPrefsKey(provider, mangaId))) === true;
+}
+
+export async function setMangaFavorite(
+  provider: string,
+  mangaId: string,
+  favorite: boolean,
+): Promise<void> {
+  if (favorite) {
+    await mangaFavStorage.setItem(mangaPrefsKey(provider, mangaId), true);
+  } else {
+    await mangaFavStorage.removeItem(mangaPrefsKey(provider, mangaId));
+  }
 }

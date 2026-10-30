@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback, Fragment, type MouseEvent } from 'react';
-import { Search, ArrowLeft, BookOpen, AlertCircle, Loader2, Download, Trash2 } from 'lucide-react';
+import { useState, useEffect, useCallback, Fragment, type MouseEvent, useRef } from 'react';
+import { Search, ArrowLeft, BookOpen, AlertCircle, Loader2, Download, Trash2, Star, X } from 'lucide-react';
 import {
   listProviders,
   searchManga,
@@ -15,11 +15,15 @@ import {
   getMangaRecord,
   openMangaChapter,
   removeMangaDownload,
+  removeManga,
   getMangaHistory,
+  isMangaFavorite,
+  setMangaFavorite,
   type MangaHistoryEntry,
   type MangaRecord,
 } from '../lib/db';
 import { downloadChapterPages } from '../lib/manga/download';
+import { cn, parseChapterNumber } from '../lib/utils';
 import { useLocalStorage } from 'usehooks-ts';
 
 const MANGA_PROVIDER_KEY = 'panelpass-manga-provider';
@@ -46,6 +50,10 @@ export default function Manga({ onOpenSettings }: { onOpenSettings: () => void }
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<MangaSearchResult | null>(null);
   const [chapters, setChapters] = useState<MangaChapter[]>([]);
+  // Always-current snapshot of the chapter list, so async handlers (openChapter)
+  // read the latest chapters even if their closure captured an empty list.
+  const chaptersRef = useRef<MangaChapter[]>([]);
+  chaptersRef.current = chapters;
   const [isLoadingChapters, setIsLoadingChapters] = useState(false);
   const [chapterError, setChapterError] = useState<string | null>(null);
 
@@ -64,14 +72,34 @@ export default function Manga({ onOpenSettings }: { onOpenSettings: () => void }
   const [batchProgress, setBatchProgress] = useState({ done: 0, total: 0 });
   const [refreshNonce, setRefreshNonce] = useState(0);
 
-  // "Continue Reading" shelf — titles you've opened before (from IndexedDB).
+  // Reusable confirm dialog state (no window.confirm — blocked in headless browser).
+  const [confirmState, setConfirmState] = useState<{ title: string; body: string; tone?: 'danger' | 'warn' | 'info'; onConfirm: () => void | Promise<void>; } | null>(null);
   const [history, setHistory] = useState<MangaHistoryEntry[]>([]);
+  // Favorited (starred) manga titles — keyed by `${provider}:${mangaId}`.
+  const [favorites, setFavorites] = useState<Set<string>>(new Set());
+
+  const mangaKeyOf = (entry: MangaHistoryEntry) => `${entry.provider}:${entry.mangaId}`;
+
+  const toggleFavorite = useCallback(async (entry: MangaHistoryEntry) => {
+    const key = mangaKeyOf(entry);
+    const next = new Set(favorites);
+    const willFavorite = !next.has(key);
+    if (willFavorite) next.add(key); else next.delete(key);
+    setFavorites(next);
+    await setMangaFavorite(entry.provider, entry.mangaId, willFavorite);
+  }, [favorites]);
+
+  // Sort: favorites first (stable), then by most-recently viewed.
+  const sortedHistory = [...history].sort((a, b) => {
+    const fa = favorites.has(mangaKeyOf(a)) ? 1 : 0;
+    const fb = favorites.has(mangaKeyOf(b)) ? 1 : 0;
+    if (fa !== fb) return fb - fa;
+    return (b.record.lastViewedAt ?? 0) - (a.record.lastViewedAt ?? 0);
+  });
 
   // Parse a chapter's numeric position for ascending sort (e.g. "Ch. 0" → 0).
-  const chapterNumber = (ch: MangaChapter): number => {
-    const n = ch.chapter != null ? parseFloat(ch.chapter) : NaN;
-    return Number.isFinite(n) ? n : Number.POSITIVE_INFINITY;
-  };
+  // Parse a chapter's numeric position for ascending sort (e.g. "Ch. 0" → 0).
+  const chapterNumber = (ch: MangaChapter): number => parseChapterNumber(ch.chapter, ch.title);
 
   const toggleSelect = useCallback((id: string) => {
     setSelectedIds((prev) => {
@@ -92,6 +120,17 @@ export default function Manga({ onOpenSettings }: { onOpenSettings: () => void }
     const ordered = chapters
       .filter((ch) => selectedIds.has(ch.id))
       .sort((a, b) => chapterNumber(a) - chapterNumber(b));
+    const count = ordered.length;
+
+    await new Promise<void>((resolve) => {
+      setConfirmState({
+        title: 'Download chapters',
+        body: `Download ${count} chapter${count > 1 ? 's' : ''} for offline reading?`,
+        tone: 'info',
+        onConfirm: async () => { await resolve(); },
+      });
+    });
+
     setBatchDownloading(true);
     setBatchProgress({ done: 0, total: ordered.length });
     let completed = 0;
@@ -147,7 +186,13 @@ export default function Manga({ onOpenSettings }: { onOpenSettings: () => void }
   useEffect(() => {
     if (!selected) {
       getMangaHistory()
-        .then(setHistory)
+        .then(async (hist) => {
+          setHistory(hist);
+          const favKeys = await Promise.all(
+            hist.map(async (e) => ((await isMangaFavorite(e.provider, e.mangaId)) ? `${e.provider}:${e.mangaId}` : null)),
+          );
+          setFavorites(new Set(favKeys.filter(Boolean) as string[]));
+        })
         .catch(() => setHistory([]));
     }
   }, [selected, refreshNonce]);
@@ -218,6 +263,9 @@ export default function Manga({ onOpenSettings }: { onOpenSettings: () => void }
     setIsLoadingChapters(true); // reuse spinner as "loading chapter"
     try {
       const pages = await getChapterPages(pid, ch.id);
+      // Use the latest chapter list (ref) so Prev/Next nav is always available,
+      // even though openChapter's closure may predate the chapter fetch.
+      const chapterList = chaptersRef.current;
       setReading({
         pages,
         target: {
@@ -229,6 +277,13 @@ export default function Manga({ onOpenSettings }: { onOpenSettings: () => void }
           mangaTitle: selected.title,
           coverUrl: selected.coverUrl,
           pageUrls: pages.map((p) => p.url),
+          chapters: chapterList,
+          loadChapterPages: async (nextId: string) => {
+            const nextPages = await getChapterPages(pid, nextId);
+            const nextCh = chapterList.find((c) => c.id === nextId);
+            const nextLabel = nextCh ? (nextCh.chapter ? `Ch. ${nextCh.chapter}${nextCh.title ? ` — ${nextCh.title}` : ''}` : nextCh.title || 'Chapter') : 'Chapter';
+            return { pages: nextPages, label: nextLabel, chapterId: nextId };
+          },
         },
       });
     } catch (e) {
@@ -272,6 +327,13 @@ export default function Manga({ onOpenSettings }: { onOpenSettings: () => void }
           mangaTitle: entry.title,
           coverUrl: entry.record.coverUrl ?? null,
           pageUrls: pages.map((p) => p.url),
+          chapters: ch,
+          loadChapterPages: async (nextId: string) => {
+            const nextPages = await getChapterPages(pid, nextId);
+            const nextCh = ch.find((c) => c.id === nextId);
+            const nextLabel = nextCh ? (nextCh.chapter ? `Ch. ${nextCh.chapter}${nextCh.title ? ` — ${nextCh.title}` : ''}` : nextCh.title || 'Chapter') : 'Chapter';
+            return { pages: nextPages, label: nextLabel, chapterId: nextId };
+          },
         },
       });
     } catch (e) {
@@ -293,7 +355,48 @@ export default function Manga({ onOpenSettings }: { onOpenSettings: () => void }
   }
 
   return (
-    <div className="flex flex-col h-full flex-1">
+    <div className="flex flex-col h-full flex-1 relative">
+      {/* Confirm modal (no window.confirm — blocked in headless browser). */}
+      {confirmState && (
+        <div className="absolute inset-0 z-[70] flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setConfirmState(null)} />
+          <div className="relative bg-[#111] border border-[#2A2A2A] rounded-xl shadow-2xl max-w-sm w-full p-5">
+            <button
+              onClick={() => setConfirmState(null)}
+              className="absolute top-3 right-3 text-[#666] hover:text-[#DDD] transition-colors"
+              aria-label="Close"
+            >
+              <X size={16} />
+            </button>
+            <h3 className="text-sm font-black uppercase tracking-tight mb-1">{confirmState.title}</h3>
+            <p className="text-xs text-[#888] leading-relaxed mb-4">{confirmState.body}</p>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setConfirmState(null)}
+                className="text-[10px] uppercase tracking-widest px-3 py-2 rounded border border-[#333] text-[#888] hover:text-[#DDD] hover:border-[#555] transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={async () => {
+                  const fn = confirmState.onConfirm;
+                  setConfirmState(null);
+                  await fn?.();
+                }}
+                className={`text-[10px] uppercase tracking-widest px-3 py-2 rounded border transition-colors ${
+                  confirmState.tone === 'danger'
+                    ? 'border-red-500 text-red-400 hover:bg-red-500 hover:text-black'
+                    : confirmState.tone === 'warn'
+                      ? 'border-amber-500 text-amber-400 hover:bg-amber-500 hover:text-black'
+                      : 'border-cyan-400 text-cyan-400 hover:bg-cyan-400 hover:text-black'
+                }`}
+              >
+                Confirm
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <header className="h-16 border-b border-[#2A2A2A] flex items-center justify-between px-8 bg-[#0F0F0F]">
         <div className="flex items-center gap-4">
           <div className="w-8 h-8 bg-cyan-400 rounded-sm transform -rotate-12 flex items-center justify-center text-black font-black text-xl font-display">P</div>
@@ -383,41 +486,71 @@ export default function Manga({ onOpenSettings }: { onOpenSettings: () => void }
               <div className="mt-10">
                 <h3 className="text-xs font-bold uppercase tracking-widest text-[#888] mb-3">Continue Reading</h3>
                 <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
-                  {history.map((entry) => {
+                  {sortedHistory.map((entry) => {
                     const rec = entry.record;
                     const cover = rec.coverUrl || null;
+                    const isFav = favorites.has(mangaKeyOf(entry));
                     const readChapters = entry.chapters.filter((c) => c.currentPage > 0 || c.isCompleted).length;
                     const progressPct = rec.totalPages > 1 ? Math.min(100, (rec.currentPage / (rec.totalPages - 1)) * 100) : (rec.isCompleted ? 100 : 0);
                     const status = rec.isCompleted ? 'Done' : rec.currentPage > 0 ? 'Reading' : 'Unread';
                     const statusColor = rec.isCompleted ? 'text-emerald-500' : rec.currentPage > 0 ? 'text-amber-400' : 'text-[#666]';
                     return (
-                      <button
+                      <div
                         key={`${entry.provider}:${entry.mangaId}`}
-                        onClick={() => resumeManga(entry)}
-                        className="group text-left bg-[#111] border border-[#222] rounded-lg overflow-hidden hover:border-cyan-400 transition-all hover:scale-[1.02]"
-                        title={`Resume ${entry.title}`}
+                        className="group relative text-left bg-[#111] border border-[#222] rounded-lg overflow-hidden hover:border-cyan-400 transition-all hover:scale-[1.02]"
                       >
-                        <div className="aspect-[3/4] bg-[#1A1A1A] flex items-center justify-center overflow-hidden relative">
-                          {cover ? (
-                            <img src={cover} alt={entry.title} loading="lazy" className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
-                          ) : (
-                            <BookOpen size={32} className="text-[#444]" />
-                          )}
-                          <div className={`absolute top-2 right-2 z-20 w-2.5 h-2.5 rounded-full ${rec.isCompleted ? 'bg-emerald-500' : rec.currentPage > 0 ? 'bg-amber-400' : 'bg-[#555]'}`}></div>
-                          <div className="absolute bottom-0 left-0 right-0 h-1 bg-[#111]">
-                            <div className="h-full bg-cyan-400" style={{ width: `${progressPct}%` }} />
+                        <button
+                          onClick={() => resumeManga(entry)}
+                          className="block w-full text-left"
+                          title={`Resume ${entry.title}`}
+                        >
+                          <div className="aspect-[3/4] bg-[#1A1A1A] flex items-center justify-center overflow-hidden relative">
+                            {cover ? (
+                              <img src={cover} alt={entry.title} loading="lazy" className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
+                            ) : (
+                              <BookOpen size={32} className="text-[#444]" />
+                            )}
+                            <div className={`absolute top-2 right-2 z-20 w-2.5 h-2.5 rounded-full ${rec.isCompleted ? 'bg-emerald-500' : rec.currentPage > 0 ? 'bg-amber-400' : 'bg-[#555]'}`}></div>
+                            <div className="absolute bottom-0 left-0 right-0 h-1 bg-[#111]">
+                              <div className="h-full bg-cyan-400" style={{ width: `${progressPct}%` }} />
+                            </div>
                           </div>
-                        </div>
-                        <div className="p-2">
-                          <p className="text-xs font-bold text-[#DDD] line-clamp-2 leading-tight">{entry.title}</p>
-                          <p className={`text-[10px] mt-1 ${statusColor}`}>
-                            {status} · {rec.chapterLabel || 'Chapter'} · pg {rec.currentPage + 1}/{rec.totalPages}
-                          </p>
-                          {entry.chapters.length > 1 && (
-                            <p className="text-[10px] text-[#666] mt-0.5">{readChapters}/{entry.chapters.length} chapters opened</p>
-                          )}
-                        </div>
-                      </button>
+                          <div className="p-2">
+                            <p className="text-xs font-bold text-[#DDD] line-clamp-2 leading-tight">{entry.title}</p>
+                            <p className={`text-[10px] mt-1 ${statusColor}`}>
+                              {status} · {rec.chapterLabel || 'Chapter'} · pg {rec.currentPage + 1}/{rec.totalPages}
+                            </p>
+                            {entry.chapters.length > 1 && (
+                              <p className="text-[10px] text-[#666] mt-0.5">{readChapters}/{entry.chapters.length} chapters opened</p>
+                            )}
+                          </div>
+                        </button>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); void toggleFavorite(entry); }}
+                          className={`absolute top-2 left-2 z-30 p-1.5 rounded-full backdrop-blur-sm transition-colors ${isFav ? 'bg-amber-400/90 text-black' : 'bg-black/50 text-[#CCC] hover:text-amber-400'}`}
+                          title={isFav ? 'Unfavorite' : 'Add to favorites'}
+                        >
+                          <Star size={14} fill={isFav ? 'currentColor' : 'none'} />
+                        </button>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setConfirmState({
+                              title: 'Remove manga',
+                              body: `Remove "${entry.title}" from Continue Reading and delete all downloaded chapters? This cannot be undone.`,
+                              tone: 'danger',
+                              onConfirm: async () => {
+                                await removeManga(entry.provider, entry.mangaId);
+                                setHistory((prev) => prev.filter((x) => x.mangaId !== entry.mangaId || x.provider !== entry.provider));
+                              },
+                            });
+                          }}
+                          className="absolute top-2 right-2 z-30 p-1.5 rounded-full bg-black/50 text-[#CCC] hover:text-red-400 backdrop-blur-sm transition-colors"
+                          title="Remove manga"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
                     );
                   })}
                 </div>
@@ -427,13 +560,20 @@ export default function Manga({ onOpenSettings }: { onOpenSettings: () => void }
             {/* Manga reading stats */}
             {history.length > 0 && (() => {
               const titles = history.length;
-              const chaptersRead = history.reduce((acc, e) => acc + e.chapters.filter((c) => c.currentPage > 0 || c.isCompleted).length, 0);
-              const pagesRead = history.reduce((acc, e) => acc + e.chapters.reduce((s, c) => s + (c.isCompleted ? c.totalPages : Math.min(c.currentPage + 1, c.totalPages)), 0), 0);
+              const allChapters = history.flatMap((e) => e.chapters);
+              const chaptersRead = allChapters.filter((c) => c.currentPage > 0 || c.isCompleted).length;
+              const chaptersDownloaded = allChapters.filter((c) => c.downloaded).length;
+              const pagesRead = allChapters.reduce((s, c) => s + (c.isCompleted ? c.totalPages : Math.min(c.currentPage + 1, c.totalPages)), 0);
               const completed = history.filter((e) => e.record.isCompleted).length;
+              const completionPct = titles > 0 ? Math.round((completed / titles) * 100) : 0;
+              // Per-provider breakdown.
+              const byProvider = new Map<string, number>();
+              for (const e of history) byProvider.set(e.provider, (byProvider.get(e.provider) ?? 0) + 1);
+              const providerRows = [...byProvider.entries()].sort((a, b) => b[1] - a[1]);
               return (
                 <div className="mt-10 border-t border-[#2A2A2A] pt-6">
                   <h4 className="text-xs font-bold text-[#555] uppercase tracking-widest mb-4">Manga Stats</h4>
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                  <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
                     <div className="bg-[#161616] p-4 rounded border border-[#222] relative overflow-hidden">
                       <p className="text-[10px] text-[#888] font-bold uppercase mb-1">Titles Opened</p>
                       <p className="text-2xl font-black italic font-display">{titles}</p>
@@ -447,10 +587,30 @@ export default function Manga({ onOpenSettings }: { onOpenSettings: () => void }
                       <p className="text-2xl font-black italic font-display">{pagesRead}</p>
                     </div>
                     <div className="bg-[#161616] p-4 rounded border border-[#222] relative overflow-hidden">
+                      <p className="text-[10px] text-[#888] font-bold uppercase mb-1">Downloaded</p>
+                      <p className="text-2xl font-black italic font-display text-amber-400">{chaptersDownloaded}</p>
+                    </div>
+                    <div className="bg-[#161616] p-4 rounded border border-[#222] relative overflow-hidden">
                       <p className="text-[10px] text-[#888] font-bold uppercase mb-1">Completed</p>
                       <p className="text-2xl font-black italic font-display text-emerald-500">{completed}</p>
                     </div>
+                    <div className="bg-[#161616] p-4 rounded border border-[#222] relative overflow-hidden">
+                      <p className="text-[10px] text-[#888] font-bold uppercase mb-1">Completion</p>
+                      <p className="text-2xl font-black italic font-display">{completionPct}%</p>
+                    </div>
                   </div>
+                  {providerRows.length > 1 && (
+                    <div className="mt-4 flex flex-wrap gap-2">
+                      {providerRows.map(([prov, count]) => (
+                        <span
+                          key={prov}
+                          className="text-[10px] uppercase tracking-widest text-[#888] bg-[#161616] border border-[#222] rounded px-2 py-1"
+                        >
+                          {prov} · {count}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                 </div>
               );
             })()}
@@ -480,6 +640,14 @@ export default function Manga({ onOpenSettings }: { onOpenSettings: () => void }
                 )}
               </div>
             </div>
+
+            {/* Chapter loading state — mirrors the chapter-list spinner in the same area */}
+            {isLoadingChapters && (
+              <div className="flex items-center gap-3 text-[#888] py-8">
+                <Loader2 size={22} className="animate-spin text-cyan-400" />
+                <span className="text-sm font-bold uppercase tracking-widest">Loading chapters…</span>
+              </div>
+            )}
 
             <div className="flex items-center justify-between mb-3 max-w-3xl">
               <h3 className="text-xs font-bold uppercase tracking-widest text-[#888]">
@@ -520,7 +688,8 @@ export default function Manga({ onOpenSettings }: { onOpenSettings: () => void }
                   {selectedIds.size} selected
                   {batchDownloading && batchProgress.total > 0 && (
                     <span className="ml-2 text-cyan-400 tabular-nums">
-                      {batchProgress.done} / {batchProgress.total}
+                      {batchProgress.done}/{batchProgress.total}
+                      {` (${Math.round((batchProgress.done / batchProgress.total) * 100)}%)`}
                     </span>
                   )}
                 </span>
@@ -547,8 +716,6 @@ export default function Manga({ onOpenSettings }: { onOpenSettings: () => void }
                 </div>
               </div>
             )}
-
-            {isLoadingChapters && <Loader2 size={18} className="animate-spin text-cyan-400" />}
             {chapterError && <div className="text-red-500 text-sm">{chapterError}</div>}
 
             {!isLoadingChapters && chapters.length === 0 && !chapterError && (
@@ -568,6 +735,17 @@ export default function Manga({ onOpenSettings }: { onOpenSettings: () => void }
                     onToggleSelect={() => toggleSelect(ch.id)}
                     coverUrl={selected.coverUrl}
                     refreshNonce={refreshNonce}
+                    onRequestConfirm={(cfg) =>
+                      new Promise<void>((resolve) => {
+                        setConfirmState({
+                          ...cfg,
+                          onConfirm: async () => {
+                            await cfg.onConfirm?.();
+                            resolve();
+                          },
+                        });
+                      })
+                    }
                   />
                 </Fragment>
               ))}
@@ -591,6 +769,7 @@ function ChapterRow({
   onToggleSelect,
   coverUrl,
   refreshNonce = 0,
+  onRequestConfirm,
 }: {
   ch: MangaChapter;
   provider: string;
@@ -601,6 +780,7 @@ function ChapterRow({
   onToggleSelect?: () => void;
   coverUrl?: string | null;
   refreshNonce?: number;
+  onRequestConfirm?: (cfg: { title: string; body: string; tone?: 'danger' | 'warn' | 'info'; onConfirm: () => void | Promise<void> }) => Promise<void>;
 }) {
   const [rec, setRec] = useState<MangaRecord | null>(null);
   const [downloading, setDownloading] = useState(false);
@@ -618,6 +798,14 @@ function ChapterRow({
   const handleDownload = useCallback(async (e: MouseEvent) => {
     e.stopPropagation();
     if (downloading) return;
+    await new Promise<void>((resolve) => {
+      onRequestConfirm?.({
+        title: 'Download chapter',
+        body: `Download Ch. ${ch.chapter ?? ch.title ?? '?'} for offline reading?`,
+        tone: 'info',
+        onConfirm: async () => { await resolve(); },
+      });
+    });
     setDownloading(true);
     setProgress(0);
     try {
@@ -654,10 +842,18 @@ function ChapterRow({
 
   const handleRemove = useCallback(async (e: MouseEvent) => {
     e.stopPropagation();
+    await new Promise<void>((resolve) => {
+      onRequestConfirm?.({
+        title: 'Remove offline copy',
+        body: `Remove Ch. ${ch.chapter ?? ch.title ?? '?'} from local storage? You can re-download it later.`,
+        tone: 'warn',
+        onConfirm: async () => { await resolve(); },
+      });
+    });
     await removeMangaDownload(provider, mangaId, ch.id);
     const refreshed = await getMangaRecord(provider, mangaId, ch.id);
     setRec(refreshed);
-  }, [provider, mangaId, ch.id]);
+  }, [provider, mangaId, ch.id, ch.chapter, ch.title]);
 
   const status = statusOf(rec);
   const style = STATUS_STYLES[status];

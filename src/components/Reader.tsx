@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { ArrowLeft, Moon, Sun, Smartphone, LayoutPanelLeft, BookOpen, AlignJustify, GalleryVertical, GalleryHorizontal, Bookmark as BookmarkIcon, X } from 'lucide-react';
-import { getComics, getComicFile, updateComicProgress, getMangaRecord, getMangaPages, openMangaChapter, updateMangaProgress, getBookmarks, toggleBookmark, updateBookmarkNote, removeBookmark, type Bookmark, type BookmarkScope } from '../lib/db';
+import { ArrowLeft, Moon, Sun, Smartphone, LayoutPanelLeft, BookOpen, AlignJustify, GalleryVertical, GalleryHorizontal, Bookmark as BookmarkIcon, X, ChevronRight, Loader2 } from 'lucide-react';
+import { getComics, getComicFile, updateComicProgress, getMangaRecord, getMangaPages, openMangaChapter, updateMangaProgress, getBookmarks, toggleBookmark, updateBookmarkNote, removeBookmark, getMangaPrefs, saveMangaPrefs, type Bookmark, type BookmarkScope } from '../lib/db';
 import { ComicParser } from '../lib/parser';
 import { type PageSource, RemotePageSource, OfflinePageSource } from '../lib/manga/pageSource';
 import { Comic, Theme } from '../types';
-import { cn } from '../lib/utils';
+import { type MangaChapter, type ChapterPage } from '../lib/manga/sources';
+import { cn, parseChapterNumber } from '../lib/utils';
 import { useLocalStorage } from 'usehooks-ts';
 
 export interface ReaderTarget {
@@ -23,6 +24,10 @@ export interface MangaReaderTarget {
   coverUrl?: string | null;
   /** Pre-fetched, proxied page image URLs (from the backend /api/source dispatch). */
   pageUrls: string[];
+  /** Sibling chapter list (ascending), used for Next/Prev chapter navigation. */
+  chapters?: MangaChapter[];
+  /** Fetches the page list for a given sibling chapter id. */
+  loadChapterPages?: (chapterId: string) => Promise<{ pages: ChapterPage[]; label: string; chapterId: string }>;
 }
 
 export default function Reader({
@@ -115,9 +120,42 @@ export default function Reader({
 
   // Settings
   const [theme, setTheme] = useLocalStorage<Theme>('panelpass-theme', 'dark');
+  // Global defaults (used for CBZ + as fallback for manga without stored prefs).
   const [readerMode, setReaderMode] = useLocalStorage<'single' | 'webtoon'>('panelpass-mode', 'single');
   const [pageSubMode, setPageSubMode] = useLocalStorage<PageSubMode>('panelpass-page-submode', 'single');
   const [webtoonSubMode, setWebtoonSubMode] = useLocalStorage<WebtoonSubMode>('panelpass-webtoon-submode', 'single');
+  // Per-manga zoom (percentage). Defaults to 100; persisted per title.
+  const [mangaZoom, setMangaZoom] = useState<number>(100);
+
+  const isManga = target.kind === 'manga';
+  const mangaKey = isManga ? `${target.provider}:${target.mangaId}` : null;
+
+  // Load + apply this title's saved reader preferences (manga only).
+  useEffect(() => {
+    if (target.kind !== 'manga') return;
+    const mt: MangaReaderTarget = target;
+    let cancelled = false;
+    getMangaPrefs(mt.provider, mt.mangaId).then((prefs) => {
+      if (cancelled) return;
+      if (prefs.readerMode) setReaderMode(prefs.readerMode);
+      if (prefs.pageSubMode) setPageSubMode(prefs.pageSubMode);
+      if (prefs.webtoonSubMode) setWebtoonSubMode(prefs.webtoonSubMode);
+      if (prefs.zoom) setMangaZoom(prefs.zoom);
+    });
+    return () => { cancelled = true; };
+  }, [target, setReaderMode, setPageSubMode, setWebtoonSubMode]);
+
+  // Persist reader prefs whenever they change (manga only).
+  useEffect(() => {
+    if (target.kind !== 'manga') return;
+    const mt: MangaReaderTarget = target;
+    saveMangaPrefs(mt.provider, mt.mangaId, {
+      readerMode,
+      pageSubMode,
+      webtoonSubMode,
+      zoom: mangaZoom,
+    });
+  }, [target, readerMode, pageSubMode, webtoonSubMode, mangaZoom]);
 
   // Refs for fresh reads from stale closures (displayPage, handleTurnPage)
   const pageSubModeRef = useRef<PageSubMode>(pageSubMode);
@@ -133,6 +171,62 @@ export default function Reader({
     mangaId: string;
     chapterId: string;
   } | null>(null);
+
+  // Active manga target — swapable for Next/Prev chapter navigation without
+  // unmounting the Reader. Starts as the incoming target.
+  const [activeTarget, setActiveTarget] = useState<MangaReaderTarget | null>(
+    target.kind === 'manga' ? target : null,
+  );
+  const [isSwitchingChapter, setIsSwitchingChapter] = useState(false);
+  // True while a Next/Prev switch is in flight — lets loadComicFiles show the
+  // in-reader overlay instead of blanking the whole screen to "Loading…".
+  const isSwitchingRef = useRef(false);
+
+  // Next/Prev chapter navigation.
+  //
+  // We navigate by READING ORDER: the chapter list sorted by the number parsed
+  // from each label. Skipped numbers are fine (Next just goes to whatever chapter
+  // exists next). To stay robust against DUPLICATE labels (two "Ch. 5"), we sort
+  // stably by [parsedNumber, originalListIndex] so ties keep their source order
+  // instead of collapsing into an unstable bucket. We do NOT use the raw list
+  // position, because sources often return chapters in a non-reading order
+  // (e.g. by updatedAt), which would jump around on Next/Prev.
+  const rawChapters = activeTarget?.chapters ?? [];
+  // Stable sort by [number, original index].
+  const ordered = rawChapters
+    .map((c, i) => ({ c, i, n: parseChapterNumber(c.chapter, c.title) }))
+    .sort((a, b) => (a.n - b.n) || (a.i - b.i))
+    .map((x) => x.c);
+
+  const currentIndex = ordered.findIndex((c) => c.id === activeTarget?.chapterId);
+  const hasNextChapter = currentIndex >= 0 && currentIndex < ordered.length - 1;
+  const hasPrevChapter = currentIndex > 0;
+
+  const goToChapter = useCallback(async (dir: 1 | -1) => {
+    if (!activeTarget?.chapters || !activeTarget.loadChapterPages) return;
+    const list = activeTarget.chapters
+      .map((c, i) => ({ c, i, n: parseChapterNumber(c.chapter, c.title) }))
+      .sort((a, b) => (a.n - b.n) || (a.i - b.i))
+      .map((x) => x.c);
+    const idx = list.findIndex((c) => c.id === activeTarget.chapterId);
+    const target = list[idx + dir];
+    if (!target) return;
+    setIsSwitchingChapter(true);
+    isSwitchingRef.current = true;
+    try {
+      const { pages, label, chapterId } = await activeTarget.loadChapterPages(target.id);
+      setActiveTarget((prev) => prev && prev.kind === 'manga'
+        ? { ...prev, chapterId, chapterLabel: label, pageUrls: pages.map((p) => p.url) }
+        : prev);
+    } catch (e) {
+      console.error('Failed to load adjacent chapter', e);
+      // Clear overlay immediately on error so it doesn't stick.
+      setIsSwitchingChapter(false);
+      isSwitchingRef.current = false;
+    }
+    // Note: isSwitchingChapter/isSwitchingRef are cleared by loadComicFiles
+    // once the new page actually renders, so the overlay covers the full wait.
+  }, [activeTarget]);
 
   // Persist progress to the correct store (CBZ → Comic, manga → MangaRecord).
   const saveProgress = useCallback((currentPage: number) => {
@@ -188,7 +282,7 @@ export default function Reader({
         offlineParserRef.current = null;
       }
     };
-  }, [target, flushPendingSave]);
+  }, [activeTarget, flushPendingSave]);
 
   // Load/unload all page blobs when switching in/out of webtoon-all mode
   useEffect(() => {
@@ -311,18 +405,24 @@ export default function Reader({
   };
 
   const loadComicFiles = async () => {
+    // Use the active (possibly chapter-switched) target; fall back to the
+    // original prop for the comic branch and first render.
+    const t = activeTarget ?? target;
+    // During a Next/Prev switch we keep the current page visible behind the
+    // loading overlay (set by goToChapter) instead of blanking the screen.
+    const switching = isSwitchingRef.current;
     try {
-      setIsLoading(true);
+      if (!switching) setIsLoading(true);
 
       let _parser: PageSource;
       let meta: Comic;
 
-      if (target.kind === 'comic') {
+      if (t.kind === 'comic') {
         const comics = await getComics();
-        const found = comics.find((c) => c.id === target.comicId);
+        const found = comics.find((c) => c.id === t.comicId);
         if (!found) throw new Error('Comic metadata not found');
         meta = found;
-        const fileBlob = await getComicFile(target.comicId);
+        const fileBlob = await getComicFile(t.comicId);
         if (!fileBlob) throw new Error('Comic file not found on device');
         const cp = new ComicParser();
         await cp.load(fileBlob);
@@ -330,12 +430,13 @@ export default function Reader({
         recordRef.current = null;
       } else {
         // Online manga chapter: pages come pre-fetched + proxied; restore from IndexedDB record.
-        const rec = await getMangaRecord(target.provider, target.mangaId, target.chapterId);
-        const totalPages = target.pageUrls.length;
+        const mt = activeTarget!; // non-null in manga mode; reflects any chapter switch
+        const rec = await getMangaRecord(mt.provider, mt.mangaId, mt.chapterId);
+        const totalPages = mt.pageUrls.length;
         const startPage = rec?.currentPage ?? 0;
         meta = {
-          id: rec?.key ?? `${target.provider}:${target.mangaId}:${target.chapterId}`,
-          title: target.mangaTitle ?? target.chapterLabel ?? 'Manga',
+          id: rec?.key ?? `${mt.provider}:${mt.mangaId}:${mt.chapterId}`,
+          title: mt.mangaTitle ?? mt.chapterLabel ?? 'Manga',
           addedAt: rec?.addedAt ?? Date.now(),
           lastViewedAt: rec?.lastViewedAt ?? Date.now(),
           currentPage: startPage,
@@ -346,30 +447,30 @@ export default function Reader({
         // Prefer offline blobs if this chapter was downloaded; otherwise stream
         // from the (proxied) network URLs.
         if (rec?.downloaded) {
-          const stored = await getMangaPages(target.provider, target.mangaId, target.chapterId);
+          const stored = await getMangaPages(mt.provider, mt.mangaId, mt.chapterId);
           if (stored && stored.blobs.length > 0) {
             const offline = new OfflinePageSource(stored.blobs);
             _parser = offline;
             offlineParserRef.current = offline;
           } else {
-            _parser = new RemotePageSource(target.pageUrls);
+            _parser = new RemotePageSource(mt.pageUrls);
           }
         } else {
-          _parser = new RemotePageSource(target.pageUrls);
+          _parser = new RemotePageSource(mt.pageUrls);
         }
         recordRef.current = {
-          provider: target.provider,
-          mangaId: target.mangaId,
-          chapterId: target.chapterId,
+          provider: mt.provider,
+          mangaId: mt.mangaId,
+          chapterId: mt.chapterId,
         };
         // Record the open (lastViewedAt + ensure persisted) even on first view.
         await openMangaChapter({
-          provider: target.provider,
-          mangaId: target.mangaId,
-          chapterId: target.chapterId,
-          mangaTitle: target.mangaTitle,
-          chapterLabel: target.chapterLabel,
-          coverUrl: target.coverUrl ?? null,
+          provider: mt.provider,
+          mangaId: mt.mangaId,
+          chapterId: mt.chapterId,
+          mangaTitle: mt.mangaTitle,
+          chapterLabel: mt.chapterLabel,
+          coverUrl: mt.coverUrl ?? null,
           totalPages,
         });
       }
@@ -379,6 +480,7 @@ export default function Reader({
 
       await displayPage(_parser, meta.currentPage);
       setIsLoading(false);
+      if (switching) setIsSwitchingChapter(false);
 
       // Auto-hide UI after small delay
       hideUITimerRef.current = setTimeout(() => setShowUI(false), 2000);
@@ -386,6 +488,7 @@ export default function Reader({
       console.error(err);
       setError('Failed to load. The file may be corrupted, deleted, or the network is unavailable.');
       setIsLoading(false);
+      if (switching) setIsSwitchingChapter(false);
     }
   };
 
@@ -543,21 +646,23 @@ export default function Reader({
       e.preventDefault(); // suppress the subsequent click event on mobile
       const now = Date.now();
       if (now - lastTapTimeRef.current < 300) {
-        // Double tap — toggle zoom
+        // Double tap — toggle zoom (CBZ only; manga uses the zoom dropdown)
         if (doubleTapTimerRef.current) {
           clearTimeout(doubleTapTimerRef.current);
           doubleTapTimerRef.current = null;
         }
-        if (isZoomedRef.current) {
-          setIsZoomed(false);
-        } else {
-          const touch = e.changedTouches[0];
-          const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-          setZoomOrigin({
-            x: ((touch.clientX - rect.left) / rect.width) * 100,
-            y: ((touch.clientY - rect.top) / rect.height) * 100,
-          });
-          setIsZoomed(true);
+        if (!isManga) {
+          if (isZoomedRef.current) {
+            setIsZoomed(false);
+          } else {
+            const touch = e.changedTouches[0];
+            const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+            setZoomOrigin({
+              x: ((touch.clientX - rect.left) / rect.width) * 100,
+              y: ((touch.clientY - rect.top) / rect.height) * 100,
+            });
+            setIsZoomed(true);
+          }
         }
         lastTapTimeRef.current = 0;
       } else {
@@ -679,6 +784,14 @@ export default function Reader({
       {/* Hidden preload image */}
       {nextPageUrl && <img src={nextPageUrl} className="hidden" aria-hidden="true" alt="preload" />}
 
+      {/* Chapter-switch loading overlay (Next/Prev) — mirrors the chapter-list spinner */}
+      {isSwitchingChapter && (
+        <div className="absolute inset-0 z-[60] flex flex-col items-center justify-center gap-3 bg-black/70 backdrop-blur-sm">
+          <Loader2 size={36} className="animate-spin text-cyan-400" />
+          <p className="text-xs font-bold uppercase tracking-widest text-[#888]">Loading chapter…</p>
+        </div>
+      )}
+
       {/* Top Header UI */}
       <div 
         className={cn(
@@ -703,6 +816,39 @@ export default function Reader({
             </p>
           </div>
         </div>
+
+        {/* Prev / Next chapter navigation (manga only, when siblings are known) */}
+        {activeTarget?.chapters && activeTarget.chapters.length > 1 && (
+          <div className="hidden md:flex items-center gap-1.5">
+            <button
+              onClick={() => goToChapter(-1)}
+              disabled={!hasPrevChapter || isSwitchingChapter}
+              className={cn(
+                'p-2 rounded border transition-colors',
+                hasPrevChapter && !isSwitchingChapter
+                  ? 'border-white/10 hover:bg-white/5 text-[#CCC]'
+                  : 'border-white/5 text-[#555] opacity-40 cursor-not-allowed',
+              )}
+              title="Previous chapter"
+            >
+              <ArrowLeft size={16} />
+            </button>
+            <button
+              onClick={() => goToChapter(1)}
+              disabled={!hasNextChapter || isSwitchingChapter}
+              className={cn(
+                'p-2 rounded border transition-colors flex items-center gap-1.5',
+                hasNextChapter && !isSwitchingChapter
+                  ? 'border-cyan-400/40 hover:bg-cyan-400/10 text-cyan-400'
+                  : 'border-white/5 text-[#555] opacity-40 cursor-not-allowed',
+              )}
+              title="Next chapter"
+            >
+              {isSwitchingChapter ? <Loader2 size={16} className="animate-spin" /> : <ChevronRight size={16} />}
+              <span className="text-[10px] font-bold uppercase tracking-widest">Next</span>
+            </button>
+          </div>
+        )}
 
         <div className="flex flex-col items-end sm:flex-row sm:items-center gap-1.5">
           {/* Main mode: Single / Webtoon */}
@@ -769,6 +915,25 @@ export default function Reader({
             )}
           </div>
 
+          {/* Zoom dropdown (manga only — replaces double-tap zoom) */}
+          {isManga && (
+            <div className="flex items-center rounded border border-white/10 overflow-hidden">
+              <select
+                value={mangaZoom}
+                onChange={(e) => setMangaZoom(Number(e.target.value))}
+                className="bg-[#161616] text-[#CCC] text-xs font-bold uppercase tracking-widest px-2 py-2 outline-none cursor-pointer"
+                title="Zoom"
+              >
+                <option value={100}>100%</option>
+                <option value={125}>125%</option>
+                <option value={150}>150%</option>
+                <option value={200}>200%</option>
+                <option value={250}>250%</option>
+                <option value={300}>300%</option>
+              </select>
+            </div>
+          )}
+
           <div className="hidden sm:block w-px h-6 bg-gray-500/30 mx-0.5" />
 
           {/* Theme */}
@@ -825,7 +990,7 @@ export default function Reader({
                 webtoonSubMode === 'all-h' ? 'flex flex-row items-center h-full' : 'flex flex-col items-center w-full',
               )}
               style={{
-                transform: isZoomed ? 'scale(1.5)' : 'scale(1)',
+                transform: `scale(${isManga ? mangaZoom / 100 : isZoomed ? 1.5 : 1})`,
                 transformOrigin: `${zoomOrigin.x}% ${zoomOrigin.y}%`,
               }}
             >
@@ -882,7 +1047,7 @@ export default function Reader({
                   alt="Left page"
                   className="h-full w-1/2 object-contain transition-transform duration-300 ease-out"
                   style={{
-                    transform: isZoomed ? 'scale(2.5)' : 'scale(1)',
+                    transform: `scale(${isManga ? mangaZoom / 100 : isZoomed ? 2.5 : 1})`,
                     transformOrigin: `${zoomOrigin.x}% ${zoomOrigin.y}%`,
                   }}
                   draggable={false}
@@ -908,7 +1073,7 @@ export default function Reader({
                   readerMode === 'webtoon' ? 'w-full max-w-3xl h-auto' : 'h-full max-w-full object-contain',
                 )}
                 style={{
-                  transform: isZoomed ? 'scale(2.5)' : 'scale(1)',
+                  transform: `scale(${isManga ? mangaZoom / 100 : isZoomed ? 2.5 : 1})`,
                   transformOrigin: `${zoomOrigin.x}% ${zoomOrigin.y}%`,
                 }}
                 draggable={false}
